@@ -1,7 +1,12 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-WORKDIR /
+WORKDIR /app
 
-COPY main.py .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "main.py"]
+COPY app ./app
+
+ENV PORT=8080
+
+CMD ["python", "app/main.py"]
