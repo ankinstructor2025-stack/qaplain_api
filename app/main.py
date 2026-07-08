@@ -1,14 +1,11 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
+from fastapi import FastAPI
+from app.routers.session import router as session_router
 
+def create_app() -> FastAPI:
+    app = FastAPI()
+    setup_cors(app)
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
+    app.include_router(session_router)
+    return app
 
-
-HTTPServer(
-    ("0.0.0.0", int(os.environ.get("PORT", 8080))),
-    Handler
-).serve_forever()
+app = create_app()
