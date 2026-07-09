@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Header, HTTPException
-import firebase_admin
-from firebase_admin import auth
 
-router = APIRouter()
+from app.core.firebase import verify_id_token
 
-@router.post("/session")
+router = APIRouter(prefix="/session", tags=["session"])
+
+
+@router.post("")
 def create_session(authorization: str = Header(...)):
 
     if not authorization.startswith("Bearer "):
@@ -12,12 +13,9 @@ def create_session(authorization: str = Header(...)):
 
     id_token = authorization.replace("Bearer ", "")
 
-    decoded_token = auth.verify_id_token(id_token)
-
-    uid = decoded_token["uid"]
-    email = decoded_token.get("email")
+    decoded_token = verify_id_token(id_token)
 
     return {
-        "uid": uid,
-        "email": email,
+        "uid": decoded_token["uid"],
+        "email": decoded_token.get("email"),
     }
