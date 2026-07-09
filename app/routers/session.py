@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Header, HTTPException
+import os
 
 from app.core.firebase import verify_id_token
 
@@ -13,9 +14,25 @@ def create_session(authorization: str = Header(...)):
 
     id_token = authorization.replace("Bearer ", "")
 
-    decoded_token = verify_id_token(id_token)
+    try:
+        decoded_token = verify_id_token(id_token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired ID token")
+
+    uid = decoded_token.get("uid")
+    email = decoded_token.get("email")
+
+    if not email:
+        raise HTTPException(status_code=401, detail="Email is not available")
+
+    system_administrator = os.getenv("SYSTEM_ADMINISTRATOR", "")
+
+    is_system_administrator = (
+        email.lower() == system_administrator.lower()
+    )
 
     return {
-        "uid": decoded_token["uid"],
-        "email": decoded_token.get("email"),
+        "uid": uid,
+        "email": email,
+        "is_system_administrator": is_system_administrator
     }
