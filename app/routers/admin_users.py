@@ -1,24 +1,20 @@
 from fastapi import APIRouter
-from firebase_admin import firestore
 
-router = APIRouter(prefix="", tags=["admin-users"])
+from app.core.firebase import get_firestore_client
+
+
+router = APIRouter()
 
 
 @router.get("/admin-users")
 def get_admin_users():
-
-    db = firestore.client()
-
-    docs = (
-        db.collection("admin_users")
-        .order_by("email")
-        .stream()
-    )
+    db = get_firestore_client()
 
     users = []
 
-    for doc in docs:
+    docs = db.collection("admin_users").stream()
 
+    for doc in docs:
         data = doc.to_dict() or {}
 
         users.append({
@@ -28,6 +24,10 @@ def get_admin_users():
             "start_date": data.get("start_date", ""),
             "end_date": data.get("end_date", "")
         })
+
+    users.sort(
+        key=lambda user: user["email"].lower()
+    )
 
     return {
         "users": users
