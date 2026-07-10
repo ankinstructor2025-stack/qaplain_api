@@ -4,6 +4,7 @@ from app.core.cors import setup_cors
 from app.core.firebase import initialize_firebase
 
 from app.routers.session import router as session_router
+from app.routers.admin_users import router as admin_users_router
 
 
 def create_app() -> FastAPI:
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
 
     # Router登録
     app.include_router(session_router)
+    app.include_router(admin_users_router)
 
     return app
 
