@@ -1,8 +1,15 @@
 import os
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Response,
+)
 from pydantic import BaseModel, Field
 
 from app.core.firebase import (
@@ -16,17 +23,37 @@ router = APIRouter(
     tags=["tenants"],
 )
 
+
 TENANT_COLLECTION = "tenants"
 ADMIN_COLLECTION = "admin_users"
 
+ENCRYPTION_KEY_ENV_NAME = (
+    "TENANT_API_KEY_ENCRYPTION_KEY"
+)
+
+OPENAI_API_KEY_FIELD = (
+    "openai_api_key_encrypted"
+)
+
+GEMINI_API_KEY_FIELD = (
+    "gemini_api_key_encrypted"
+)
+
 
 class TenantRequest(BaseModel):
+
     tenant_name: str = Field(
         min_length=1,
         max_length=100,
     )
+
     start_date: str
+
     end_date: Optional[str] = None
+
+    openai_api_key: Optional[str] = None
+
+    gemini_api_key: Optional[str] = None
 
 
 def now_iso() -> str:
@@ -53,26 +80,176 @@ def normalize_end_date(
     return end_date.strip() or None
 
 
+def normalize_api_key(
+    api_key: Optional[str],
+) -> Optional[str]:
+
+    if api_key is None:
+        return None
+
+    api_key = api_key.strip()
+
+    return api_key or None
+
+
 def validate_date_range(
     start_date: str,
     end_date: Optional[str],
 ) -> None:
 
     if not start_date:
+
         raise HTTPException(
             status_code=400,
-            detail="利用開始日を入力してください。",
+            detail=(
+                "利用開始日を入力してください。"
+            ),
         )
 
     if (
         end_date
         and start_date > end_date
     ):
+
         raise HTTPException(
             status_code=400,
             detail=(
-                "利用終了日は利用開始日以降に"
-                "してください。"
+                "利用終了日は"
+                "利用開始日以降にしてください。"
+            ),
+        )
+
+
+@lru_cache
+def get_api_key_cipher() -> Fernet:
+
+    encryption_key = os.getenv(
+        ENCRYPTION_KEY_ENV_NAME,
+        "",
+    ).strip()
+
+    if not encryption_key:
+
+        raise RuntimeError(
+            f"{ENCRYPTION_KEY_ENV_NAME} "
+            "が設定されていません。"
+        )
+
+    try:
+
+        return Fernet(
+            encryption_key.encode(
+                "utf-8"
+            )
+        )
+
+    except Exception as error:
+
+        raise RuntimeError(
+            f"{ENCRYPTION_KEY_ENV_NAME} "
+            "の形式が不正です。"
+        ) from error
+
+
+def encrypt_api_key(
+    api_key: Optional[str],
+) -> Optional[str]:
+
+    normalized_api_key = normalize_api_key(
+        api_key
+    )
+
+    if normalized_api_key is None:
+        return None
+
+    try:
+
+        cipher = get_api_key_cipher()
+
+        encrypted_value = cipher.encrypt(
+            normalized_api_key.encode(
+                "utf-8"
+            )
+        )
+
+        return encrypted_value.decode(
+            "utf-8"
+        )
+
+    except RuntimeError:
+
+        raise
+
+    except Exception as error:
+
+        print(
+            "APIキー暗号化エラー: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "APIキーを暗号化できませんでした。"
+            ),
+        )
+
+
+def decrypt_api_key(
+    encrypted_api_key: Optional[str],
+) -> Optional[str]:
+
+    if not encrypted_api_key:
+        return None
+
+    try:
+
+        cipher = get_api_key_cipher()
+
+        decrypted_value = cipher.decrypt(
+            encrypted_api_key.encode(
+                "utf-8"
+            )
+        )
+
+        return decrypted_value.decode(
+            "utf-8"
+        )
+
+    except InvalidToken:
+
+        print(
+            "APIキー復号エラー: "
+            "暗号化キーが一致しないか、"
+            "保存値が破損しています。"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "保存されているAPIキーを"
+                "復号できませんでした。"
+            ),
+        )
+
+    except RuntimeError:
+
+        raise
+
+    except Exception as error:
+
+        print(
+            "APIキー復号エラー: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "保存されているAPIキーを"
+                "復号できませんでした。"
             ),
         )
 
@@ -84,9 +261,12 @@ def authenticate_user_administrator(
     if not authorization.startswith(
         "Bearer "
     ):
+
         raise HTTPException(
             status_code=401,
-            detail="Invalid Authorization header",
+            detail=(
+                "Invalid Authorization header"
+            ),
         )
 
     id_token = authorization.replace(
@@ -125,17 +305,18 @@ def authenticate_user_administrator(
     )
 
     if not email:
+
         raise HTTPException(
             status_code=401,
-            detail="Email is not available",
+            detail=(
+                "Email is not available"
+            ),
         )
 
-    system_administrator = (
-        normalize_email(
-            os.getenv(
-                "SYSTEM_ADMINISTRATOR",
-                "",
-            )
+    system_administrator = normalize_email(
+        os.getenv(
+            "SYSTEM_ADMINISTRATOR",
+            "",
         )
     )
 
@@ -194,6 +375,7 @@ def authenticate_user_administrator(
             is_started
             and is_not_ended
         ):
+
             return {
                 **decoded_token,
                 "email": email,
@@ -201,7 +383,9 @@ def authenticate_user_administrator(
 
     raise HTTPException(
         status_code=403,
-        detail="管理権限がありません。",
+        detail=(
+            "管理権限がありません。"
+        ),
     )
 
 
@@ -259,9 +443,7 @@ def get_owned_tenant(
         )
     )
 
-    document = (
-        document_reference.get()
-    )
+    document = document_reference.get()
 
     if not document.exists:
 
@@ -275,12 +457,10 @@ def get_owned_tenant(
 
     data = document.to_dict() or {}
 
-    stored_parent_user = (
-        normalize_email(
-            data.get(
-                "parent_user",
-                "",
-            )
+    stored_parent_user = normalize_email(
+        data.get(
+            "parent_user",
+            "",
         )
     )
 
@@ -331,6 +511,35 @@ def document_to_dict(
     }
 
 
+def document_to_detail_dict(
+    document,
+) -> dict:
+
+    data = document.to_dict() or {}
+
+    result = document_to_dict(
+        document
+    )
+
+    result["openai_api_key"] = (
+        decrypt_api_key(
+            data.get(
+                OPENAI_API_KEY_FIELD
+            )
+        )
+    )
+
+    result["gemini_api_key"] = (
+        decrypt_api_key(
+            data.get(
+                GEMINI_API_KEY_FIELD
+            )
+        )
+    )
+
+    return result
+
+
 @router.get("")
 def get_tenants(
     authorization: str = Header(...),
@@ -364,7 +573,9 @@ def get_tenants(
     )
 
     tenants = [
-        document_to_dict(document)
+        document_to_dict(
+            document
+        )
         for document in documents
     ]
 
@@ -384,6 +595,7 @@ def get_tenants(
 @router.get("/{tenant_id}")
 def get_tenant(
     tenant_id: str,
+    response: Response,
     authorization: str = Header(...),
 ):
 
@@ -405,7 +617,22 @@ def get_tenant(
         parent_user,
     )
 
-    return document_to_dict(
+    response.headers[
+        "Cache-Control"
+    ] = (
+        "no-store, no-cache, "
+        "must-revalidate, private"
+    )
+
+    response.headers[
+        "Pragma"
+    ] = "no-cache"
+
+    response.headers[
+        "Expires"
+    ] = "0"
+
+    return document_to_detail_dict(
         document
     )
 
@@ -444,6 +671,14 @@ def create_tenant(
         request.end_date
     )
 
+    openai_api_key = normalize_api_key(
+        request.openai_api_key
+    )
+
+    gemini_api_key = normalize_api_key(
+        request.gemini_api_key
+    )
+
     validate_date_range(
         start_date,
         end_date,
@@ -461,6 +696,14 @@ def create_tenant(
         "parent_user": parent_user,
         "start_date": start_date,
         "end_date": end_date,
+        OPENAI_API_KEY_FIELD:
+            encrypt_api_key(
+                openai_api_key
+            ),
+        GEMINI_API_KEY_FIELD:
+            encrypt_api_key(
+                gemini_api_key
+            ),
         "created_at": now,
         "updated_at": now,
     }
@@ -478,10 +721,9 @@ def create_tenant(
         data
     )
 
-    return {
-        "id": document_reference.id,
-        **data,
-    }
+    return document_to_dict(
+        document_reference.get()
+    )
 
 
 @router.put("/{tenant_id}")
@@ -529,6 +771,7 @@ def update_tenant(
         requested_start_date
         != current_start_date
     ):
+
         raise HTTPException(
             status_code=400,
             detail=(
@@ -545,6 +788,14 @@ def update_tenant(
         request.end_date
     )
 
+    openai_api_key = normalize_api_key(
+        request.openai_api_key
+    )
+
+    gemini_api_key = normalize_api_key(
+        request.gemini_api_key
+    )
+
     validate_date_range(
         current_start_date,
         end_date,
@@ -556,11 +807,23 @@ def update_tenant(
         exclude_id=tenant_id,
     )
 
-    document_reference.update({
+    update_data = {
         "tenant_name": tenant_name,
         "end_date": end_date,
+        OPENAI_API_KEY_FIELD:
+            encrypt_api_key(
+                openai_api_key
+            ),
+        GEMINI_API_KEY_FIELD:
+            encrypt_api_key(
+                gemini_api_key
+            ),
         "updated_at": now_iso(),
-    })
+    }
+
+    document_reference.update(
+        update_data
+    )
 
     return document_to_dict(
         document_reference.get()
