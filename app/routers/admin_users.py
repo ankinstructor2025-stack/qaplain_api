@@ -5,10 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.firebase import (
-    get_firestore_client,
-    verify_id_token,
-)
+from app.core.firebase import get_firestore_client, verify_id_token
 
 
 router = APIRouter(
@@ -16,7 +13,8 @@ router = APIRouter(
     tags=["admin-users"],
 )
 
-COLLECTION_NAME = "admin_users"
+ADMIN_COLLECTION = "admin_users"
+GENERAL_COLLECTION = "general_users"
 
 
 class AdminUserRequest(BaseModel):
@@ -26,10 +24,34 @@ class AdminUserRequest(BaseModel):
     end_date: Optional[str] = None
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def normalize_end_date(end_date: Optional[str]) -> Optional[str]:
+    if not end_date:
+        return None
+    return end_date.strip() or None
+
+
+def validate_date_range(
+    start_date: str,
+    end_date: Optional[str],
+) -> None:
+    if end_date and start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="利用終了日は利用開始日以降にしてください。",
+        )
+
+
 def authenticate_system_administrator(
     authorization: str,
 ) -> dict:
-
     if not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
@@ -73,7 +95,7 @@ def authenticate_system_administrator(
             detail="SYSTEM_ADMINISTRATOR is not configured",
         )
 
-    if email.lower() != system_administrator.lower():
+    if normalize_email(email) != normalize_email(system_administrator):
         raise HTTPException(
             status_code=403,
             detail="SYSTEM_ADMINISTRATOR permission is required",
@@ -82,41 +104,39 @@ def authenticate_system_administrator(
     return decoded_token
 
 
-def validate_date_range(
-    start_date: str,
-    end_date: Optional[str],
-) -> None:
+def get_document_by_email(
+    collection_name: str,
+    email: str,
+):
+    db = get_firestore_client()
 
-    if end_date and start_date > end_date:
-        raise HTTPException(
-            status_code=400,
-            detail="利用終了日は利用開始日以降にしてください。",
-        )
+    documents = (
+        db.collection(collection_name)
+        .where("email", "==", normalize_email(email))
+        .limit(1)
+        .stream()
+    )
+
+    return next(documents, None)
 
 
 def check_duplicate_email(
     email: str,
     exclude_id: Optional[str] = None,
 ) -> None:
-
-    db = get_firestore_client()
-
-    documents = (
-        db.collection(COLLECTION_NAME)
-        .where("email", "==", email.lower())
-        .stream()
+    document = get_document_by_email(
+        ADMIN_COLLECTION,
+        email,
     )
 
-    for document in documents:
-        if document.id != exclude_id:
-            raise HTTPException(
-                status_code=409,
-                detail="同じメールアドレスが既に登録されています。",
-            )
+    if document and document.id != exclude_id:
+        raise HTTPException(
+            status_code=409,
+            detail="同じメールアドレスが既に登録されています。",
+        )
 
 
 def document_to_dict(document) -> dict:
-
     data = document.to_dict() or {}
 
     return {
@@ -130,28 +150,75 @@ def document_to_dict(document) -> dict:
     }
 
 
+def sync_general_user(
+    db,
+    user_name: str,
+    email: str,
+    start_date: str,
+    end_date: Optional[str],
+    updated_at: str,
+) -> None:
+    document = get_document_by_email(
+        GENERAL_COLLECTION,
+        email,
+    )
+
+    data = {
+        "user_name": user_name,
+        "email": email,
+        "user_type": "ADMIN",
+        "start_date": start_date,
+        "end_date": end_date,
+        "updated_at": updated_at,
+    }
+
+    if document:
+        document.reference.set(
+            data,
+            merge=True,
+        )
+        return
+
+    data["created_at"] = updated_at
+
+    db.collection(
+        GENERAL_COLLECTION
+    ).document().set(data)
+
+
+def delete_general_user_by_email(
+    db,
+    email: str,
+) -> None:
+    documents = (
+        db.collection(GENERAL_COLLECTION)
+        .where("email", "==", normalize_email(email))
+        .stream()
+    )
+
+    for document in documents:
+        document.reference.delete()
+
+
 @router.get("")
 def get_admin_users(
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(authorization)
 
     db = get_firestore_client()
 
     documents = (
-        db.collection(COLLECTION_NAME)
+        db.collection(ADMIN_COLLECTION)
         .order_by("user_name")
         .stream()
     )
 
-    users = [
-        document_to_dict(document)
-        for document in documents
-    ]
-
     return {
-        "users": users,
+        "users": [
+            document_to_dict(document)
+            for document in documents
+        ]
     }
 
 
@@ -160,13 +227,12 @@ def get_admin_user(
     admin_user_id: str,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(authorization)
 
     db = get_firestore_client()
 
     document = (
-        db.collection(COLLECTION_NAME)
+        db.collection(ADMIN_COLLECTION)
         .document(admin_user_id)
         .get()
     )
@@ -185,26 +251,17 @@ def create_admin_user(
     request: AdminUserRequest,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(authorization)
 
     user_name = request.user_name.strip()
-    email = str(request.email).strip().lower()
+    email = normalize_email(request.email)
     start_date = request.start_date.strip()
-    end_date = (
-        request.end_date.strip()
-        if request.end_date
-        else None
-    )
+    end_date = normalize_end_date(request.end_date)
 
-    validate_date_range(
-        start_date,
-        end_date,
-    )
-
+    validate_date_range(start_date, end_date)
     check_duplicate_email(email)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso()
 
     data = {
         "user_name": user_name,
@@ -216,13 +273,21 @@ def create_admin_user(
     }
 
     db = get_firestore_client()
-
     document_reference = (
-        db.collection(COLLECTION_NAME)
+        db.collection(ADMIN_COLLECTION)
         .document()
     )
 
     document_reference.set(data)
+
+    sync_general_user(
+        db=db,
+        user_name=user_name,
+        email=email,
+        start_date=start_date,
+        end_date=end_date,
+        updated_at=now,
+    )
 
     return {
         "id": document_reference.id,
@@ -236,16 +301,13 @@ def update_admin_user(
     request: AdminUserRequest,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(authorization)
 
     db = get_firestore_client()
-
     document_reference = (
-        db.collection(COLLECTION_NAME)
+        db.collection(ADMIN_COLLECTION)
         .document(admin_user_id)
     )
-
     document = document_reference.get()
 
     if not document.exists:
@@ -254,40 +316,55 @@ def update_admin_user(
             detail="管理ユーザーが見つかりません。",
         )
 
-    user_name = request.user_name.strip()
-    email = str(request.email).strip().lower()
-    start_date = request.start_date.strip()
-    end_date = (
-        request.end_date.strip()
-        if request.end_date
-        else None
+    current = document.to_dict() or {}
+    current_email = normalize_email(
+        current.get("email", "")
+    )
+    current_start_date = current.get(
+        "start_date",
+        "",
     )
 
+    if normalize_email(request.email) != current_email:
+        raise HTTPException(
+            status_code=400,
+            detail="メールアドレスは変更できません。",
+        )
+
+    if request.start_date.strip() != current_start_date:
+        raise HTTPException(
+            status_code=400,
+            detail="利用開始日は変更できません。",
+        )
+
+    user_name = request.user_name.strip()
+    end_date = normalize_end_date(request.end_date)
+
     validate_date_range(
-        start_date,
+        current_start_date,
         end_date,
     )
 
-    check_duplicate_email(
-        email,
-        exclude_id=admin_user_id,
+    now = now_iso()
+
+    document_reference.update({
+        "user_name": user_name,
+        "end_date": end_date,
+        "updated_at": now,
+    })
+
+    sync_general_user(
+        db=db,
+        user_name=user_name,
+        email=current_email,
+        start_date=current_start_date,
+        end_date=end_date,
+        updated_at=now,
     )
 
-    data = {
-        "user_name": user_name,
-        "email": email,
-        "start_date": start_date,
-        "end_date": end_date,
-        "updated_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
-    }
-
-    document_reference.update(data)
-
-    updated_document = document_reference.get()
-
-    return document_to_dict(updated_document)
+    return document_to_dict(
+        document_reference.get()
+    )
 
 
 @router.delete("/{admin_user_id}")
@@ -295,16 +372,13 @@ def delete_admin_user(
     admin_user_id: str,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(authorization)
 
     db = get_firestore_client()
-
     document_reference = (
-        db.collection(COLLECTION_NAME)
+        db.collection(ADMIN_COLLECTION)
         .document(admin_user_id)
     )
-
     document = document_reference.get()
 
     if not document.exists:
@@ -313,7 +387,18 @@ def delete_admin_user(
             detail="管理ユーザーが見つかりません。",
         )
 
+    email = normalize_email(
+        (document.to_dict() or {}).get(
+            "email",
+            "",
+        )
+    )
+
     document_reference.delete()
+    delete_general_user_by_email(
+        db,
+        email,
+    )
 
     return {
         "status": "deleted",
