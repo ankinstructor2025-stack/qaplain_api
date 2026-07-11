@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from app.core.firebase import (
     get_firestore_client,
@@ -21,7 +21,7 @@ COLLECTION_NAME = "admin_users"
 
 class AdminUserRequest(BaseModel):
     user_name: str = Field(min_length=1, max_length=100)
-    email: EmailStr
+    email: str = Field(min_length=1, max_length=200)
     start_date: str
     end_date: Optional[str] = None
 
