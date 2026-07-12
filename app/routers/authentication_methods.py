@@ -442,6 +442,107 @@ def get_authentication_methods(
     }
 
 
+def authenticate_logged_in_user(
+    authorization: str,
+) -> dict:
+
+    if not authorization.startswith(
+        "Bearer "
+    ):
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header",
+        )
+
+    id_token = authorization.replace(
+        "Bearer ",
+        "",
+        1,
+    ).strip()
+
+    try:
+
+        decoded_token = verify_id_token(
+            id_token
+        )
+
+    except Exception as error:
+
+        print(
+            "verify_id_token error: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=401,
+            detail="認証情報を確認できませんでした。",
+        )
+
+    email = normalize_email(
+        decoded_token.get(
+            "email",
+            "",
+        )
+    )
+
+    if not email:
+
+        raise HTTPException(
+            status_code=401,
+            detail="メールアドレスを取得できませんでした。",
+        )
+
+    return {
+        **decoded_token,
+        "email": email,
+    }
+
+
+@router.get("/available")
+def get_available_authentication_methods(
+    authorization: str = Header(...),
+):
+
+    authenticate_logged_in_user(
+        authorization
+    )
+
+    db = get_firestore_client()
+
+    documents = (
+        db.collection(
+            AUTHENTICATION_METHOD_COLLECTION
+        )
+        .where(
+            "enabled",
+            "==",
+            True,
+        )
+        .stream()
+    )
+
+    authentication_methods = [
+        document_to_dict(
+            document
+        )
+        for document in documents
+    ]
+
+    authentication_methods.sort(
+        key=lambda item:
+        item.get(
+            "display_name",
+            "",
+        )
+    )
+
+    return {
+        "authentication_methods":
+            authentication_methods
+    }
+
 @router.get("/{method_key}")
 def get_authentication_method(
     method_key: str,
