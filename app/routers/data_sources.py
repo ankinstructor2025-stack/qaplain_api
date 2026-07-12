@@ -321,11 +321,11 @@ def create_parent_data(
 def set_authentication_data(
     data: dict,
     request: DataSourceRequest,
-    method_key: str
+    method_key: str,
+    is_update: bool = False
 ):
-    clear_authentication_fields(
-        data
-    )
+    if is_update:
+        clear_authentication_fields(data)
 
     if method_key == "basic":
         data["username"] = normalize_text(
@@ -356,7 +356,6 @@ def set_authentication_data(
         data["scope"] = normalize_text(
             request.scope
         )
-
 
 def clear_authentication_fields(
     data: dict
