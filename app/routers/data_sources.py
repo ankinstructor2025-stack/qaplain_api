@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from firebase_admin import firestore
+from app.core.firebase import get_firestore_client
 from pydantic import BaseModel, Field
 
 
@@ -51,7 +52,7 @@ class DataSourceRequest(BaseModel):
 
 
 def get_db():
-    return firestore.client()
+    return get_firestore_client()
 
 
 def normalize_text(
