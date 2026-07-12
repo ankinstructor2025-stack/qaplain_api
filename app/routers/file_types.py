@@ -1,6 +1,6 @@
 import os
+import re
 from datetime import datetime, timezone
-from typing import List
 
 from fastapi import (
     APIRouter,
@@ -37,32 +37,7 @@ class FileTypeRequest(BaseModel):
         max_length=20,
     )
 
-    display_name: str = Field(
-        min_length=1,
-        max_length=100,
-    )
-
-    mime_types: List[str] = Field(
-        min_length=1,
-    )
-
-    parser_type: str = Field(
-        min_length=1,
-        max_length=50,
-    )
-
-    max_file_size_mb: int = Field(
-        ge=1,
-        le=10000,
-    )
-
     enabled: bool = True
-
-    sort_order: int = Field(
-        default=10,
-        ge=0,
-        le=9999,
-    )
 
     @field_validator(
         "extension"
@@ -83,7 +58,10 @@ class FileTypeRequest(BaseModel):
                 "拡張子を入力してください。"
             )
 
-        if not normalized.isalnum():
+        if not re.fullmatch(
+            r"[a-z0-9]+",
+            normalized,
+        ):
 
             raise ValueError(
                 "拡張子は半角英数字で"
@@ -91,61 +69,6 @@ class FileTypeRequest(BaseModel):
             )
 
         return normalized
-
-    @field_validator(
-        "display_name",
-        "parser_type",
-    )
-    @classmethod
-    def strip_text(
-        cls,
-        value: str,
-    ) -> str:
-
-        value = value.strip()
-
-        if not value:
-
-            raise ValueError(
-                "必須項目を入力してください。"
-            )
-
-        return value
-
-    @field_validator(
-        "mime_types"
-    )
-    @classmethod
-    def normalize_mime_types(
-        cls,
-        values: List[str],
-    ) -> List[str]:
-
-        normalized_values = []
-
-        for value in values:
-
-            normalized = str(
-                value
-            ).strip().lower()
-
-            if (
-                normalized
-                and normalized
-                not in normalized_values
-            ):
-
-                normalized_values.append(
-                    normalized
-                )
-
-        if not normalized_values:
-
-            raise ValueError(
-                "MIMEタイプを入力してください。"
-            )
-
-        return normalized_values
 
 
 def now_iso() -> str:
@@ -312,40 +235,10 @@ def document_to_dict(
                 document.id,
             ),
 
-        "display_name":
-            data.get(
-                "display_name",
-                "",
-            ),
-
-        "mime_types":
-            data.get(
-                "mime_types",
-                [],
-            ),
-
-        "parser_type":
-            data.get(
-                "parser_type",
-                "",
-            ),
-
-        "max_file_size_mb":
-            data.get(
-                "max_file_size_mb",
-                50,
-            ),
-
         "enabled":
             data.get(
                 "enabled",
                 True,
-            ),
-
-        "sort_order":
-            data.get(
-                "sort_order",
-                10,
             ),
 
         "created_at":
@@ -396,15 +289,10 @@ def get_file_types(
     ]
 
     file_types.sort(
-        key=lambda item: (
-            item.get(
-                "sort_order",
-                9999,
-            ),
-            item.get(
-                "extension",
-                "",
-            ),
+        key=lambda item:
+        item.get(
+            "extension",
+            "",
         )
     )
 
@@ -491,23 +379,8 @@ def create_file_type(
         "extension":
             extension,
 
-        "display_name":
-            request.display_name,
-
-        "mime_types":
-            request.mime_types,
-
-        "parser_type":
-            request.parser_type,
-
-        "max_file_size_mb":
-            request.max_file_size_mb,
-
         "enabled":
             request.enabled,
-
-        "sort_order":
-            request.sort_order,
 
         "created_at":
             now,
@@ -569,24 +442,9 @@ def update_file_type(
             ),
         )
 
-    update_data = {
-        "display_name":
-            request.display_name,
-
-        "mime_types":
-            request.mime_types,
-
-        "parser_type":
-            request.parser_type,
-
-        "max_file_size_mb":
-            request.max_file_size_mb,
-
+    document_reference.update({
         "enabled":
             request.enabled,
-
-        "sort_order":
-            request.sort_order,
 
         "updated_at":
             now_iso(),
@@ -596,11 +454,7 @@ def update_file_type(
                 "email",
                 "",
             ),
-    }
-
-    document_reference.update(
-        update_data
-    )
+    })
 
     return document_to_dict(
         document_reference.get()
