@@ -1,0 +1,860 @@
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from firebase_admin import firestore
+from pydantic import BaseModel, Field
+
+
+router = APIRouter(
+    prefix="/data-sources",
+    tags=["data_sources"]
+)
+
+
+DATA_SOURCE_COLLECTION = "data_sources"
+PARAMETER_COLLECTION = "parameters"
+
+
+class DataSourceParameterRequest(BaseModel):
+    parameter_id: str | None = None
+    parameter_type: str
+    parameter_name: str
+    parameter_value: Any = ""
+    display_order: int = 0
+
+
+class DataSourceRequest(BaseModel):
+    data_source_name: str
+    source_type: str
+
+    endpoint_url: str | None = None
+    http_method: str | None = None
+    file_extensions: list[str] = Field(
+        default_factory=list
+    )
+
+    authentication_method_key: str | None = None
+
+    username: str | None = None
+    password: str | None = None
+
+    client_id: str | None = None
+    client_secret: str | None = None
+    token_url: str | None = None
+    scope: str | None = None
+
+    enabled: bool = True
+
+    parameters: list[DataSourceParameterRequest] = Field(
+        default_factory=list
+    )
+
+
+def get_db():
+    return firestore.client()
+
+
+def normalize_text(
+    value: str | None
+) -> str:
+    return str(
+        value or ""
+    ).strip()
+
+
+def normalize_key(
+    value: str | None
+) -> str:
+    return normalize_text(
+        value
+    ).lower().replace(
+        "-",
+        "_"
+    )
+
+
+def validate_data_source_request(
+    request: DataSourceRequest,
+    is_update: bool
+):
+    data_source_name = normalize_text(
+        request.data_source_name
+    )
+
+    if not data_source_name:
+        raise HTTPException(
+            status_code=400,
+            detail="データソース名を入力してください。"
+        )
+
+    source_type = normalize_key(
+        request.source_type
+    )
+
+    if source_type not in (
+        "file",
+        "mail",
+        "url",
+        "api"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="データソース種別が正しくありません。"
+        )
+
+    if source_type in (
+        "url",
+        "api"
+    ):
+        if not normalize_text(
+            request.endpoint_url
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="接続先URLを入力してください。"
+            )
+
+        validate_authentication(
+            request=request,
+            is_update=is_update
+        )
+
+    validate_parameters(
+        request.parameters
+    )
+
+
+def validate_authentication(
+    request: DataSourceRequest,
+    is_update: bool
+):
+    method_key = normalize_key(
+        request.authentication_method_key
+    )
+
+    if not method_key:
+        raise HTTPException(
+            status_code=400,
+            detail="認証方式を選択してください。"
+        )
+
+    if method_key == "basic":
+        if not normalize_text(
+            request.username
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="ユーザーIDを入力してください。"
+            )
+
+        if (
+            not is_update
+            and not request.password
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="パスワードを入力してください。"
+            )
+
+    if is_client_credentials_method(
+        method_key
+    ):
+        if not normalize_text(
+            request.client_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="クライアントIDを入力してください。"
+            )
+
+        if (
+            not is_update
+            and not request.client_secret
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "クライアントシークレットを"
+                    "入力してください。"
+                )
+            )
+
+
+def validate_parameters(
+    parameters: list[DataSourceParameterRequest]
+):
+    duplicate_keys = set()
+
+    for parameter in parameters:
+        parameter_type = normalize_key(
+            parameter.parameter_type
+        )
+
+        parameter_name = normalize_text(
+            parameter.parameter_name
+        )
+
+        if parameter_type not in (
+            "query",
+            "header",
+            "body",
+            "path"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "パラメータ種別が"
+                    "正しくありません。"
+                )
+            )
+
+        if not parameter_name:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "パラメータ名を"
+                    "入力してください。"
+                )
+            )
+
+        duplicate_key = (
+            parameter_type,
+            parameter_name.lower()
+        )
+
+        if duplicate_key in duplicate_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "同じ種類とパラメータ名が"
+                    "重複しています。"
+                )
+            )
+
+        duplicate_keys.add(
+            duplicate_key
+        )
+
+
+def is_client_credentials_method(
+    method_key: str
+) -> bool:
+    return method_key in (
+        "credential",
+        "credentials",
+        "client_credentials"
+    )
+
+
+def create_parent_data(
+    request: DataSourceRequest
+) -> dict:
+    source_type = normalize_key(
+        request.source_type
+    )
+
+    method_key = normalize_key(
+        request.authentication_method_key
+    )
+
+    data = {
+        "data_source_name":
+            normalize_text(
+                request.data_source_name
+            ),
+
+        "source_type":
+            source_type,
+
+        "enabled":
+            request.enabled,
+
+        "updated_at":
+            firestore.SERVER_TIMESTAMP
+    }
+
+    if source_type in (
+        "file",
+        "mail"
+    ):
+        data["file_extensions"] = [
+            normalize_text(
+                extension
+            )
+            for extension
+            in request.file_extensions
+            if normalize_text(
+                extension
+            )
+        ]
+
+    if source_type in (
+        "url",
+        "api"
+    ):
+        data["endpoint_url"] = normalize_text(
+            request.endpoint_url
+        )
+
+        data["http_method"] = (
+            normalize_text(
+                request.http_method
+            ).upper()
+            if source_type == "api"
+            else "GET"
+        )
+
+        data[
+            "authentication_method_key"
+        ] = method_key
+
+        set_authentication_data(
+            data=data,
+            request=request,
+            method_key=method_key
+        )
+
+    return data
+
+
+def set_authentication_data(
+    data: dict,
+    request: DataSourceRequest,
+    method_key: str
+):
+    clear_authentication_fields(
+        data
+    )
+
+    if method_key == "basic":
+        data["username"] = normalize_text(
+            request.username
+        )
+
+        if request.password:
+            data["password"] = request.password
+
+        return
+
+    if is_client_credentials_method(
+        method_key
+    ):
+        data["client_id"] = normalize_text(
+            request.client_id
+        )
+
+        if request.client_secret:
+            data["client_secret"] = (
+                request.client_secret
+            )
+
+        data["token_url"] = normalize_text(
+            request.token_url
+        )
+
+        data["scope"] = normalize_text(
+            request.scope
+        )
+
+
+def clear_authentication_fields(
+    data: dict
+):
+    data.update({
+        "username":
+            firestore.DELETE_FIELD,
+
+        "password":
+            firestore.DELETE_FIELD,
+
+        "client_id":
+            firestore.DELETE_FIELD,
+
+        "client_secret":
+            firestore.DELETE_FIELD,
+
+        "token_url":
+            firestore.DELETE_FIELD,
+
+        "scope":
+            firestore.DELETE_FIELD
+    })
+
+
+def create_parameter_data(
+    parameter: DataSourceParameterRequest,
+    display_order: int
+) -> dict:
+    return {
+        "parameter_type":
+            normalize_key(
+                parameter.parameter_type
+            ),
+
+        "parameter_name":
+            normalize_text(
+                parameter.parameter_name
+            ),
+
+        "parameter_value":
+            parameter.parameter_value,
+
+        "display_order":
+            display_order,
+
+        "updated_at":
+            firestore.SERVER_TIMESTAMP
+    }
+
+
+def serialize_data_source(
+    document
+) -> dict:
+    data = document.to_dict() or {}
+
+    result = {
+        "data_source_id":
+            document.id,
+
+        "data_source_name":
+            data.get(
+                "data_source_name",
+                ""
+            ),
+
+        "source_type":
+            data.get(
+                "source_type",
+                ""
+            ),
+
+        "endpoint_url":
+            data.get(
+                "endpoint_url",
+                ""
+            ),
+
+        "http_method":
+            data.get(
+                "http_method",
+                ""
+            ),
+
+        "file_extensions":
+            data.get(
+                "file_extensions",
+                []
+            ),
+
+        "authentication_method_key":
+            data.get(
+                "authentication_method_key",
+                ""
+            ),
+
+        "username":
+            data.get(
+                "username",
+                ""
+            ),
+
+        "client_id":
+            data.get(
+                "client_id",
+                ""
+            ),
+
+        "token_url":
+            data.get(
+                "token_url",
+                ""
+            ),
+
+        "scope":
+            data.get(
+                "scope",
+                ""
+            ),
+
+        "password_registered":
+            bool(
+                data.get(
+                    "password"
+                )
+            ),
+
+        "client_secret_registered":
+            bool(
+                data.get(
+                    "client_secret"
+                )
+            ),
+
+        "enabled":
+            data.get(
+                "enabled",
+                True
+            )
+    }
+
+    return result
+
+
+def serialize_parameter(
+    document
+) -> dict:
+    data = document.to_dict() or {}
+
+    return {
+        "parameter_id":
+            document.id,
+
+        "parameter_type":
+            data.get(
+                "parameter_type",
+                ""
+            ),
+
+        "parameter_name":
+            data.get(
+                "parameter_name",
+                ""
+            ),
+
+        "parameter_value":
+            data.get(
+                "parameter_value",
+                ""
+            ),
+
+        "display_order":
+            data.get(
+                "display_order",
+                0
+            )
+    }
+
+
+def get_data_source_document(
+    data_source_id: str
+):
+    db = get_db()
+
+    document_reference = (
+        db.collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .document(
+            data_source_id
+        )
+    )
+
+    document = document_reference.get()
+
+    if not document.exists:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "データソースが"
+                "見つかりません。"
+            )
+        )
+
+    return document_reference, document
+
+
+def load_parameters(
+    document_reference
+) -> list[dict]:
+    parameter_documents = (
+        document_reference
+        .collection(
+            PARAMETER_COLLECTION
+        )
+        .order_by(
+            "display_order"
+        )
+        .stream()
+    )
+
+    return [
+        serialize_parameter(
+            document
+        )
+        for document
+        in parameter_documents
+    ]
+
+
+def replace_parameters(
+    document_reference,
+    parameters: list[DataSourceParameterRequest]
+):
+    db = get_db()
+    batch = db.batch()
+
+    existing_documents = (
+        document_reference
+        .collection(
+            PARAMETER_COLLECTION
+        )
+        .stream()
+    )
+
+    for existing_document in existing_documents:
+        batch.delete(
+            existing_document.reference
+        )
+
+    for index, parameter in enumerate(
+        parameters,
+        start=1
+    ):
+        parameter_id = normalize_text(
+            parameter.parameter_id
+        )
+
+        if parameter_id:
+            parameter_reference = (
+                document_reference
+                .collection(
+                    PARAMETER_COLLECTION
+                )
+                .document(
+                    parameter_id
+                )
+            )
+        else:
+            parameter_reference = (
+                document_reference
+                .collection(
+                    PARAMETER_COLLECTION
+                )
+                .document()
+            )
+
+        parameter_data = create_parameter_data(
+            parameter=parameter,
+            display_order=index
+        )
+
+        parameter_data["created_at"] = (
+            firestore.SERVER_TIMESTAMP
+        )
+
+        batch.set(
+            parameter_reference,
+            parameter_data
+        )
+
+    batch.commit()
+
+
+@router.get("")
+def list_data_sources():
+    db = get_db()
+
+    documents = (
+        db.collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .order_by(
+            "data_source_name"
+        )
+        .stream()
+    )
+
+    data_sources = [
+        serialize_data_source(
+            document
+        )
+        for document
+        in documents
+    ]
+
+    return {
+        "data_sources":
+            data_sources
+    }
+
+
+@router.get("/{data_source_id}")
+def get_data_source(
+    data_source_id: str
+):
+    document_reference, document = (
+        get_data_source_document(
+            data_source_id
+        )
+    )
+
+    data_source = serialize_data_source(
+        document
+    )
+
+    data_source["parameters"] = (
+        load_parameters(
+            document_reference
+        )
+    )
+
+    return {
+        "data_source":
+            data_source
+    }
+
+
+@router.post("")
+def create_data_source(
+    request: DataSourceRequest
+):
+    validate_data_source_request(
+        request=request,
+        is_update=False
+    )
+
+    db = get_db()
+
+    document_reference = (
+        db.collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .document()
+    )
+
+    parent_data = create_parent_data(
+        request
+    )
+
+    parent_data["created_at"] = (
+        firestore.SERVER_TIMESTAMP
+    )
+
+    document_reference.set(
+        parent_data
+    )
+
+    replace_parameters(
+        document_reference=document_reference,
+        parameters=request.parameters
+    )
+
+    return {
+        "message":
+            "データソースを登録しました。",
+
+        "data_source_id":
+            document_reference.id
+    }
+
+
+@router.put("/{data_source_id}")
+def update_data_source(
+    data_source_id: str,
+    request: DataSourceRequest
+):
+    validate_data_source_request(
+        request=request,
+        is_update=True
+    )
+
+    document_reference, existing_document = (
+        get_data_source_document(
+            data_source_id
+        )
+    )
+
+    existing_data = (
+        existing_document.to_dict()
+        or {}
+    )
+
+    parent_data = create_parent_data(
+        request
+    )
+
+    method_key = normalize_key(
+        request.authentication_method_key
+    )
+
+    if (
+        method_key == "basic"
+        and not request.password
+        and existing_data.get(
+            "password"
+        )
+    ):
+        parent_data["password"] = (
+            existing_data["password"]
+        )
+
+    if (
+        is_client_credentials_method(
+            method_key
+        )
+        and not request.client_secret
+        and existing_data.get(
+            "client_secret"
+        )
+    ):
+        parent_data["client_secret"] = (
+            existing_data[
+                "client_secret"
+            ]
+        )
+
+    document_reference.set(
+        parent_data,
+        merge=True
+    )
+
+    replace_parameters(
+        document_reference=document_reference,
+        parameters=request.parameters
+    )
+
+    return {
+        "message":
+            "データソースを更新しました。",
+
+        "data_source_id":
+            data_source_id
+    }
+
+
+@router.delete("/{data_source_id}")
+def delete_data_source(
+    data_source_id: str
+):
+    document_reference, _ = (
+        get_data_source_document(
+            data_source_id
+        )
+    )
+
+    db = get_db()
+    batch = db.batch()
+
+    parameter_documents = (
+        document_reference
+        .collection(
+            PARAMETER_COLLECTION
+        )
+        .stream()
+    )
+
+    for parameter_document in parameter_documents:
+        batch.delete(
+            parameter_document.reference
+        )
+
+    batch.delete(
+        document_reference
+    )
+
+    batch.commit()
+
+    return {
+        "message":
+            "データソースを削除しました。"
+    }
