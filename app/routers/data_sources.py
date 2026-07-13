@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException
 from firebase_admin import firestore
 from pydantic import BaseModel, Field
 
+from app.core.firebase import get_firestore_client
+
 
 router = APIRouter(
     prefix="/data-sources",
@@ -28,6 +30,7 @@ class DataSourceRequest(BaseModel):
 
     endpoint_url: str | None = None
     http_method: str | None = None
+
     file_extensions: list[str] = Field(
         default_factory=list
     )
@@ -50,7 +53,7 @@ class DataSourceRequest(BaseModel):
 
 
 def get_db():
-    return firestore.client()
+    return get_firestore_client()
 
 
 def normalize_text(
@@ -192,26 +195,21 @@ def validate_parameters(
         if not parameter_name:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "項目名を入力してください。"
-                )
+                detail="項目名を入力してください。"
             )
 
-        duplicate_name = (
-            parameter_name.lower()
-        )
+        duplicate_name = parameter_name.lower()
 
         if duplicate_name in duplicate_names:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "同じ項目名が重複しています。"
-                )
+                detail="同じ項目名が重複しています。"
             )
 
         duplicate_names.add(
             duplicate_name
         )
+
 
 def is_client_credentials_method(
     method_key: str
@@ -224,7 +222,8 @@ def is_client_credentials_method(
 
 
 def create_parent_data(
-    request: DataSourceRequest
+    request: DataSourceRequest,
+    is_update: bool
 ) -> dict:
     source_type = normalize_key(
         request.source_type
@@ -258,12 +257,16 @@ def create_parent_data(
             normalize_text(
                 extension
             )
-            for extension
-            in request.file_extensions
+            for extension in request.file_extensions
             if normalize_text(
                 extension
             )
         ]
+
+        if is_update:
+            clear_connection_fields(
+                data
+            )
 
     if source_type in (
         "url",
@@ -281,27 +284,68 @@ def create_parent_data(
             else "GET"
         )
 
-        data[
-            "authentication_method_key"
-        ] = method_key
+        data["authentication_method_key"] = (
+            method_key
+        )
+
+        if is_update:
+            data["file_extensions"] = (
+                firestore.DELETE_FIELD
+            )
 
         set_authentication_data(
             data=data,
             request=request,
-            method_key=method_key
+            method_key=method_key,
+            is_update=is_update
         )
 
     return data
 
 
+def clear_connection_fields(
+    data: dict
+):
+    data.update({
+        "endpoint_url":
+            firestore.DELETE_FIELD,
+
+        "http_method":
+            firestore.DELETE_FIELD,
+
+        "authentication_method_key":
+            firestore.DELETE_FIELD,
+
+        "username":
+            firestore.DELETE_FIELD,
+
+        "password":
+            firestore.DELETE_FIELD,
+
+        "client_id":
+            firestore.DELETE_FIELD,
+
+        "client_secret":
+            firestore.DELETE_FIELD,
+
+        "token_url":
+            firestore.DELETE_FIELD,
+
+        "scope":
+            firestore.DELETE_FIELD
+    })
+
+
 def set_authentication_data(
     data: dict,
     request: DataSourceRequest,
-    method_key: str
+    method_key: str,
+    is_update: bool
 ):
-    clear_authentication_fields(
-        data
-    )
+    if is_update:
+        clear_authentication_fields(
+            data
+        )
 
     if method_key == "basic":
         data["username"] = normalize_text(
@@ -309,7 +353,9 @@ def set_authentication_data(
         )
 
         if request.password:
-            data["password"] = request.password
+            data["password"] = (
+                request.password
+            )
 
         return
 
@@ -384,7 +430,7 @@ def serialize_data_source(
 ) -> dict:
     data = document.to_dict() or {}
 
-    result = {
+    return {
         "data_source_id":
             document.id,
 
@@ -469,8 +515,6 @@ def serialize_data_source(
             )
     }
 
-    return result
-
 
 def serialize_parameter(
     document
@@ -520,13 +564,13 @@ def get_data_source_document(
     if not document.exists:
         raise HTTPException(
             status_code=404,
-            detail=(
-                "データソースが"
-                "見つかりません。"
-            )
+            detail="データソースが見つかりません。"
         )
 
-    return document_reference, document
+    return (
+        document_reference,
+        document
+    )
 
 
 def load_parameters(
@@ -547,8 +591,7 @@ def load_parameters(
         serialize_parameter(
             document
         )
-        for document
-        in parameter_documents
+        for document in parameter_documents
     ]
 
 
@@ -590,6 +633,7 @@ def replace_parameters(
                     parameter_id
                 )
             )
+
         else:
             parameter_reference = (
                 document_reference
@@ -634,8 +678,7 @@ def list_data_sources():
         serialize_data_source(
             document
         )
-        for document
-        in documents
+        for document in documents
     ]
 
     return {
@@ -648,10 +691,11 @@ def list_data_sources():
 def get_data_source(
     data_source_id: str
 ):
-    document_reference, document = (
-        get_data_source_document(
-            data_source_id
-        )
+    (
+        document_reference,
+        document
+    ) = get_data_source_document(
+        data_source_id
     )
 
     data_source = serialize_data_source(
@@ -689,7 +733,8 @@ def create_data_source(
     )
 
     parent_data = create_parent_data(
-        request
+        request=request,
+        is_update=False
     )
 
     parent_data["created_at"] = (
@@ -700,10 +745,15 @@ def create_data_source(
         parent_data
     )
 
-    replace_parameters(
-        document_reference=document_reference,
-        parameters=request.parameters
-    )
+    try:
+        replace_parameters(
+            document_reference=document_reference,
+            parameters=request.parameters
+        )
+
+    except Exception:
+        document_reference.delete()
+        raise
 
     return {
         "message":
@@ -724,10 +774,11 @@ def update_data_source(
         is_update=True
     )
 
-    document_reference, existing_document = (
-        get_data_source_document(
-            data_source_id
-        )
+    (
+        document_reference,
+        existing_document
+    ) = get_data_source_document(
+        data_source_id
     )
 
     existing_data = (
@@ -736,7 +787,8 @@ def update_data_source(
     )
 
     parent_data = create_parent_data(
-        request
+        request=request,
+        is_update=True
     )
 
     method_key = normalize_key(
