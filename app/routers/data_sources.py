@@ -15,6 +15,7 @@ router = APIRouter(
 
 DATA_SOURCE_COLLECTION = "data_sources"
 PARAMETER_COLLECTION = "parameters"
+FILE_TYPE_COLLECTION = "supported_file_types"
 
 
 class DataSourceParameterRequest(BaseModel):
@@ -75,6 +76,16 @@ def normalize_key(
     )
 
 
+def normalize_file_extension(
+    value: str | None
+) -> str:
+    return normalize_text(
+        value
+    ).lower().lstrip(
+        "."
+    )
+
+
 def validate_data_source_request(
     request: DataSourceRequest,
     is_update: bool
@@ -104,6 +115,11 @@ def validate_data_source_request(
             detail="データソース種別が正しくありません。"
         )
 
+    if source_type == "file":
+        validate_file_extensions(
+            request.file_extensions
+        )
+
     if source_type in (
         "url",
         "api"
@@ -124,6 +140,73 @@ def validate_data_source_request(
     validate_parameters(
         request.parameters
     )
+
+
+def validate_file_extensions(
+    file_extensions: list[str]
+):
+    normalized_extensions = []
+
+    for extension in file_extensions:
+        normalized_extension = (
+            normalize_file_extension(
+                extension
+            )
+        )
+
+        if (
+            normalized_extension
+            and normalized_extension
+            not in normalized_extensions
+        ):
+            normalized_extensions.append(
+                normalized_extension
+            )
+
+    if not normalized_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "対象拡張子を"
+                "1つ以上選択してください。"
+            )
+        )
+
+    db = get_db()
+
+    for extension in normalized_extensions:
+        document = (
+            db.collection(
+                FILE_TYPE_COLLECTION
+            )
+            .document(
+                extension
+            )
+            .get()
+        )
+
+        if not document.exists:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f".{extension}は"
+                    "拡張子管理に登録されていません。"
+                )
+            )
+
+        data = document.to_dict() or {}
+
+        if data.get(
+            "enabled",
+            True
+        ) is False:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f".{extension}は"
+                    "無効な拡張子です。"
+                )
+            )
 
 
 def validate_authentication(
@@ -253,15 +336,17 @@ def create_parent_data(
         "file",
         "mail"
     ):
-        data["file_extensions"] = [
-            normalize_text(
-                extension
+        data["file_extensions"] = list(
+            dict.fromkeys(
+                normalize_file_extension(
+                    extension
+                )
+                for extension in request.file_extensions
+                if normalize_file_extension(
+                    extension
+                )
             )
-            for extension in request.file_extensions
-            if normalize_text(
-                extension
-            )
-        ]
+        )
 
         if is_update:
             clear_connection_fields(

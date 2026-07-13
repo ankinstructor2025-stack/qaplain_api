@@ -96,7 +96,7 @@ def normalize_extension(
     ).strip().lower().lstrip(".")
 
 
-def authenticate_system_administrator(
+def authenticate_user(
     authorization: str,
 ) -> dict:
 
@@ -155,6 +155,25 @@ def authenticate_system_administrator(
             ),
         )
 
+    return {
+        **decoded_token,
+        "email": email,
+    }
+
+
+def authenticate_system_administrator(
+    authorization: str,
+) -> dict:
+
+    decoded_token = authenticate_user(
+        authorization
+    )
+
+    email = decoded_token.get(
+        "email",
+        "",
+    )
+
     system_administrator = normalize_email(
         os.getenv(
             "SYSTEM_ADMINISTRATOR",
@@ -174,10 +193,7 @@ def authenticate_system_administrator(
             ),
         )
 
-    return {
-        **decoded_token,
-        "email": email,
-    }
+    return decoded_token
 
 
 def get_file_type_document(
@@ -277,6 +293,49 @@ def get_file_types(
     documents = (
         db.collection(
             FILE_TYPE_COLLECTION
+        )
+        .stream()
+    )
+
+    file_types = [
+        document_to_dict(
+            document
+        )
+        for document in documents
+    ]
+
+    file_types.sort(
+        key=lambda item:
+        item.get(
+            "extension",
+            "",
+        )
+    )
+
+    return {
+        "file_types": file_types
+    }
+
+
+@router.get("/available")
+def get_available_file_types(
+    authorization: str = Header(...),
+):
+
+    authenticate_user(
+        authorization
+    )
+
+    db = get_firestore_client()
+
+    documents = (
+        db.collection(
+            FILE_TYPE_COLLECTION
+        )
+        .where(
+            "enabled",
+            "==",
+            True,
         )
         .stream()
     )
