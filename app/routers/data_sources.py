@@ -2,7 +2,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from firebase_admin import firestore
-from app.core.firebase import get_firestore_client
 from pydantic import BaseModel, Field
 
 
@@ -18,7 +17,6 @@ PARAMETER_COLLECTION = "parameters"
 
 class DataSourceParameterRequest(BaseModel):
     parameter_id: str | None = None
-    parameter_type: str
     parameter_name: str
     parameter_value: Any = ""
     display_order: int = 0
@@ -52,7 +50,7 @@ class DataSourceRequest(BaseModel):
 
 
 def get_db():
-    return get_firestore_client()
+    return firestore.client()
 
 
 def normalize_text(
@@ -184,58 +182,36 @@ def validate_authentication(
 def validate_parameters(
     parameters: list[DataSourceParameterRequest]
 ):
-    duplicate_keys = set()
+    duplicate_names = set()
 
     for parameter in parameters:
-        parameter_type = normalize_key(
-            parameter.parameter_type
-        )
-
         parameter_name = normalize_text(
             parameter.parameter_name
         )
-
-        if parameter_type not in (
-            "query",
-            "header",
-            "body",
-            "path"
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "パラメータ種別が"
-                    "正しくありません。"
-                )
-            )
 
         if not parameter_name:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "パラメータ名を"
-                    "入力してください。"
+                    "項目名を入力してください。"
                 )
             )
 
-        duplicate_key = (
-            parameter_type,
+        duplicate_name = (
             parameter_name.lower()
         )
 
-        if duplicate_key in duplicate_keys:
+        if duplicate_name in duplicate_names:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "同じ種類とパラメータ名が"
-                    "重複しています。"
+                    "同じ項目名が重複しています。"
                 )
             )
 
-        duplicate_keys.add(
-            duplicate_key
+        duplicate_names.add(
+            duplicate_name
         )
-
 
 def is_client_credentials_method(
     method_key: str
@@ -321,11 +297,11 @@ def create_parent_data(
 def set_authentication_data(
     data: dict,
     request: DataSourceRequest,
-    method_key: str,
-    is_update: bool = False
+    method_key: str
 ):
-    if is_update:
-        clear_authentication_fields(data)
+    clear_authentication_fields(
+        data
+    )
 
     if method_key == "basic":
         data["username"] = normalize_text(
@@ -357,6 +333,7 @@ def set_authentication_data(
             request.scope
         )
 
+
 def clear_authentication_fields(
     data: dict
 ):
@@ -386,11 +363,6 @@ def create_parameter_data(
     display_order: int
 ) -> dict:
     return {
-        "parameter_type":
-            normalize_key(
-                parameter.parameter_type
-            ),
-
         "parameter_name":
             normalize_text(
                 parameter.parameter_name
@@ -508,12 +480,6 @@ def serialize_parameter(
     return {
         "parameter_id":
             document.id,
-
-        "parameter_type":
-            data.get(
-                "parameter_type",
-                ""
-            ),
 
         "parameter_name":
             data.get(
