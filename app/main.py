@@ -12,6 +12,7 @@ from app.routers.authentication_methods import router as authentication_methods_
 from app.routers.data_sources import router as data_sources_router
 from app.routers.data_import_file import router as data_import_file_router
 from app.routers.data_import_uploaded_files import router as data_import_uploaded_files_router
+from app.routers.data_import_none import router as data_import_none_router
 
 def create_app() -> FastAPI:
     # Firebase Admin SDK 初期化
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(data_sources_router)
     app.include_router(data_import_file_router)
     app.include_router(data_import_uploaded_files_router)
+    app.include_router(data_import_none_router)
 
     return app
 
