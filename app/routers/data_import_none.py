@@ -707,6 +707,102 @@ def count_documents(
     return None
 
 
+
+def build_preview(
+    content: bytes,
+    content_type: str,
+    max_characters: int = 20000,
+) -> dict:
+    text_types = {
+        "application/json",
+        "application/xml",
+        "text/xml",
+        "text/csv",
+        "text/plain",
+        "text/html",
+    }
+
+    if content_type not in text_types:
+        return {
+            "preview_available":
+                False,
+
+            "preview_format":
+                "",
+
+            "preview_text":
+                "",
+        }
+
+    try:
+        decoded_text = content.decode(
+            "utf-8",
+        )
+
+    except UnicodeDecodeError:
+        decoded_text = content.decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    preview_format = "text"
+
+    if content_type == "application/json":
+        preview_format = "json"
+
+        try:
+            parsed_data = json.loads(
+                decoded_text
+            )
+
+            decoded_text = json.dumps(
+                parsed_data,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        except Exception:
+            pass
+
+    elif content_type in {
+        "application/xml",
+        "text/xml",
+    }:
+        preview_format = "xml"
+
+    elif content_type == "text/html":
+        preview_format = "html"
+
+    elif content_type == "text/csv":
+        preview_format = "csv"
+
+    truncated = (
+        len(decoded_text)
+        > max_characters
+    )
+
+    preview_text = decoded_text[
+        :max_characters
+    ]
+
+    if truncated:
+        preview_text += (
+            "\n\n"
+            "※ 表示上限を超えたため、"
+            "先頭部分のみ表示しています。"
+        )
+
+    return {
+        "preview_available":
+            True,
+
+        "preview_format":
+            preview_format,
+
+        "preview_text":
+            preview_text,
+    }
+
 def build_gcs_path(
     data_source_id: str,
     item_id: str,
@@ -834,6 +930,21 @@ def register_import_item(
 
         "gcs_uri":
             f"gs://{BUCKET_NAME}/{gcs_path}",
+
+        "preview_available":
+            preview[
+                "preview_available"
+            ],
+
+        "preview_format":
+            preview[
+                "preview_format"
+            ],
+
+        "preview_text":
+            preview[
+                "preview_text"
+            ],
 
         "status":
             "downloaded",
@@ -970,6 +1081,11 @@ def import_none(
                 "取込管理情報の登録に失敗しました。"
             ),
         )
+
+    preview = build_preview(
+        content=content,
+        content_type=content_type,
+    )
 
     return {
         "message":
