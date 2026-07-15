@@ -37,6 +37,10 @@ DATA_SOURCE_COLLECTION = (
     "data_sources"
 )
 
+PARAMETER_COLLECTION = (
+    "parameters"
+)
+
 DATA_IMPORT_ITEM_COLLECTION = (
     "data_import_items"
 )
@@ -199,56 +203,53 @@ def authenticate_user(
     }
 
 
-def normalize_parameters(
-    values: Any,
+def load_parameters(
+    document_reference,
 ) -> list[dict]:
-    if not isinstance(
-        values,
-        list,
-    ):
-        return []
+    parameter_documents = (
+        document_reference
+        .collection(
+            PARAMETER_COLLECTION
+        )
+        .order_by(
+            "display_order"
+        )
+        .stream()
+    )
 
     parameters = []
 
-    for value in values:
-        if not isinstance(
-            value,
-            dict,
-        ):
-            continue
+    for document in parameter_documents:
+        data = document.to_dict() or {}
 
-        key = normalize_text(
-            value.get(
-                "key",
-                value.get(
-                    "name",
-                    value.get(
-                        "item_name",
-                        "",
-                    ),
-                ),
+        parameter_name = normalize_text(
+            data.get(
+                "parameter_name",
+                "",
             )
         )
 
-        parameter_value = normalize_text(
-            value.get(
-                "value",
-                value.get(
-                    "item_value",
-                    "",
-                ),
-            )
-        )
-
-        if not key:
+        if not parameter_name:
             continue
 
         parameters.append({
-            "key":
-                key,
+            "parameter_id":
+                document.id,
 
-            "value":
-                parameter_value,
+            "parameter_name":
+                parameter_name,
+
+            "parameter_value":
+                data.get(
+                    "parameter_value",
+                    "",
+                ),
+
+            "display_order":
+                data.get(
+                    "display_order",
+                    0,
+                ),
         })
 
     return parameters
@@ -261,16 +262,27 @@ def get_data_source(
         data_source_id
     )
 
+    if not normalized_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "データソースIDが指定されていません。"
+            ),
+        )
+
     db = get_firestore_client()
 
-    document = (
+    document_reference = (
         db.collection(
             DATA_SOURCE_COLLECTION
         )
         .document(
             normalized_id
         )
-        .get()
+    )
+
+    document = (
+        document_reference.get()
     )
 
     if not document.exists:
@@ -284,8 +296,6 @@ def get_data_source(
     data = document.to_dict() or {}
 
     return {
-        **data,
-
         "data_source_id":
             document.id,
 
@@ -303,28 +313,11 @@ def get_data_source(
                 )
             ),
 
-        "authentication_method_key":
-            normalize_authentication_method(
-                data.get(
-                    "authentication_method_key",
-                    data.get(
-                        "authentication_method",
-                        "",
-                    ),
-                )
-            ),
-
-        "connection_url":
+        "endpoint_url":
             normalize_text(
                 data.get(
-                    "connection_url",
-                    data.get(
-                        "url",
-                        data.get(
-                            "endpoint",
-                            "",
-                        ),
-                    ),
+                    "endpoint_url",
+                    "",
                 )
             ),
 
@@ -336,15 +329,17 @@ def get_data_source(
                 )
             ).upper(),
 
-        "parameters":
-            normalize_parameters(
+        "authentication_method_key":
+            normalize_authentication_method(
                 data.get(
-                    "parameters",
-                    data.get(
-                        "items",
-                        [],
-                    ),
+                    "authentication_method_key",
+                    "",
                 )
+            ),
+
+        "parameters":
+            load_parameters(
+                document_reference
             ),
 
         "enabled":
@@ -396,7 +391,7 @@ def validate_data_source(
         )
 
     if not data_source.get(
-        "connection_url"
+        "endpoint_url"
     ):
         raise HTTPException(
             status_code=400,
@@ -423,23 +418,38 @@ def build_requested_url(
     data_source: dict,
 ) -> str:
     base_url = data_source[
-        "connection_url"
+        "endpoint_url"
     ]
 
-    query_values = {
-        parameter["key"]:
-            parameter["value"]
+    query_values = {}
 
-        for parameter
-        in data_source.get(
-            "parameters",
-            []
+    for parameter in data_source.get(
+        "parameters",
+        []
+    ):
+        parameter_name = normalize_text(
+            parameter.get(
+                "parameter_name",
+                "",
+            )
         )
 
-        if parameter.get(
-            "key"
+        if not parameter_name:
+            continue
+
+        parameter_value = parameter.get(
+            "parameter_value",
+            "",
         )
-    }
+
+        if parameter_value is None:
+            parameter_value = ""
+
+        query_values[
+            parameter_name
+        ] = str(
+            parameter_value
+        )
 
     if not query_values:
         return base_url
@@ -605,8 +615,18 @@ def get_extension(
         )
 
     parameter_map = {
-        parameter["key"].lower():
-            parameter["value"].lower()
+        normalize_text(
+            parameter.get(
+                "parameter_name",
+                "",
+            )
+        ).lower():
+            normalize_text(
+                parameter.get(
+                    "parameter_value",
+                    "",
+                )
+            ).lower()
 
         for parameter
         in data_source.get(
@@ -697,7 +717,7 @@ def build_gcs_path(
         f"{data_source_id}/"
         "api-imports/"
         f"{item_id}/"
-        f"response.{extension}"
+        f"source.{extension}"
     )
 
 
@@ -769,9 +789,6 @@ def register_import_item(
 
         "parent_id":
             None,
-
-        "level":
-            1,
 
         "item_type":
             "raw_response",
