@@ -155,7 +155,6 @@ def serialize_import(
     status_code=201,
 )
 async def import_file_upload(
-    data_source_id: str = Form(...),
     overwrite: bool = Form(False),
     file: UploadFile = File(...),
     authorization: str = Header(...),
@@ -164,12 +163,7 @@ async def import_file_upload(
         authorization
     )
 
-    data_source = get_data_source(
-        data_source_id
-    )
-
     return execute_file_upload(
-        data_source=data_source,
         upload_file=file,
         overwrite=overwrite,
         user=user,
@@ -202,31 +196,16 @@ def import_none(
     "/uploaded-files"
 )
 def get_uploaded_files(
-    data_source_id: str = Query(
-        ...,
-        min_length=1,
-    ),
     authorization: str = Header(...),
 ):
     authenticate_user(
         authorization
     )
 
-    normalized_data_source_id = (
-        normalize_text(
-            data_source_id
-        )
-    )
-
     documents = (
         get_firestore_client()
         .collection(
             UPLOADED_FILE_COLLECTION
-        )
-        .where(
-            "data_source_id",
-            "==",
-            normalized_data_source_id,
         )
         .stream()
     )
