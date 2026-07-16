@@ -115,7 +115,20 @@ def validate_data_source_request(
             detail="データソース種別が正しくありません。"
         )
 
+    method_key = normalize_key(
+        request.authentication_method_key
+    )
+
     if source_type == "file":
+        if method_key != "file_upload":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ファイル型のデータソースは"
+                    "認証方式にfile_uploadを指定してください。"
+                )
+            )
+
         validate_file_extensions(
             request.file_extensions
         )
@@ -124,6 +137,14 @@ def validate_data_source_request(
         "url",
         "api"
     ):
+        if method_key == "file_upload":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "URLまたはAPI型のデータソースでは"
+                    "file_uploadを使用できません。"
+                )
+            )
         if not normalize_text(
             request.endpoint_url
         ):
@@ -348,10 +369,20 @@ def create_parent_data(
             )
         )
 
+        if source_type == "file":
+            data["authentication_method_key"] = (
+                "file_upload"
+            )
+
         if is_update:
-            clear_connection_fields(
+            clear_external_connection_fields(
                 data
             )
+
+            if source_type == "mail":
+                data["authentication_method_key"] = (
+                    firestore.DELETE_FIELD
+                )
 
     if source_type in (
         "url",
@@ -388,7 +419,7 @@ def create_parent_data(
     return data
 
 
-def clear_connection_fields(
+def clear_external_connection_fields(
     data: dict
 ):
     data.update({
@@ -396,9 +427,6 @@ def clear_connection_fields(
             firestore.DELETE_FIELD,
 
         "http_method":
-            firestore.DELETE_FIELD,
-
-        "authentication_method_key":
             firestore.DELETE_FIELD,
 
         "username":
