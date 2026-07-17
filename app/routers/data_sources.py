@@ -32,6 +32,9 @@ class DataSourceRequest(BaseModel):
     endpoint_url: str | None = None
     http_method: str | None = None
 
+    retrieval_type: str | None = None
+    data_format: str | None = None
+
     file_extensions: list[str] = Field(
         default_factory=list
     )
@@ -119,6 +122,14 @@ def validate_data_source_request(
         request.authentication_method_key
     )
 
+    retrieval_type = normalize_key(
+        request.retrieval_type
+    )
+
+    data_format = normalize_key(
+        request.data_format
+    )
+
     if source_type == "file":
         if method_key != "file_upload":
             raise HTTPException(
@@ -145,12 +156,40 @@ def validate_data_source_request(
                     "file_uploadを使用できません。"
                 )
             )
+
         if not normalize_text(
             request.endpoint_url
         ):
             raise HTTPException(
                 status_code=400,
                 detail="接続先URLを入力してください。"
+            )
+
+        if retrieval_type not in (
+            "structured_data",
+            "file"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="取得方式を選択してください。"
+            )
+
+        if retrieval_type == "structured_data":
+            if data_format not in (
+                "json",
+                "xml"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "データ形式はJSONまたは"
+                        "XMLを選択してください。"
+                    )
+                )
+
+        if retrieval_type == "file":
+            validate_file_extensions(
+                request.file_extensions
             )
 
         validate_authentication(
@@ -373,11 +412,23 @@ def create_parent_data(
             data["authentication_method_key"] = (
                 "file_upload"
             )
+            data["retrieval_type"] = "file"
+            data["data_format"] = (
+                firestore.DELETE_FIELD
+                if is_update
+                else None
+            )
 
         if is_update:
             clear_external_connection_fields(
                 data
             )
+
+            if source_type == "file":
+                data["retrieval_type"] = "file"
+                data["data_format"] = (
+                    firestore.DELETE_FIELD
+                )
 
             if source_type == "mail":
                 data["authentication_method_key"] = (
@@ -404,9 +455,40 @@ def create_parent_data(
             method_key
         )
 
-        if is_update:
+        retrieval_type = normalize_key(
+            request.retrieval_type
+        )
+
+        data["retrieval_type"] = (
+            retrieval_type
+        )
+
+        if retrieval_type == "structured_data":
+            data["data_format"] = normalize_key(
+                request.data_format
+            )
             data["file_extensions"] = (
                 firestore.DELETE_FIELD
+                if is_update
+                else []
+            )
+
+        if retrieval_type == "file":
+            data["data_format"] = (
+                firestore.DELETE_FIELD
+                if is_update
+                else None
+            )
+            data["file_extensions"] = list(
+                dict.fromkeys(
+                    normalize_file_extension(
+                        extension
+                    )
+                    for extension in request.file_extensions
+                    if normalize_file_extension(
+                        extension
+                    )
+                )
             )
 
         set_authentication_data(
@@ -445,6 +527,12 @@ def clear_external_connection_fields(
             firestore.DELETE_FIELD,
 
         "scope":
+            firestore.DELETE_FIELD,
+
+        "retrieval_type":
+            firestore.DELETE_FIELD,
+
+        "data_format":
             firestore.DELETE_FIELD
     })
 
@@ -568,6 +656,24 @@ def serialize_data_source(
         "http_method":
             data.get(
                 "http_method",
+                ""
+            ),
+
+        "retrieval_type":
+            data.get(
+                "retrieval_type",
+                (
+                    "file"
+                    if data.get(
+                        "source_type"
+                    ) == "file"
+                    else ""
+                )
+            ),
+
+        "data_format":
+            data.get(
+                "data_format",
                 ""
             ),
 
