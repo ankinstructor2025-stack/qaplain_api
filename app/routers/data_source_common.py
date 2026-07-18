@@ -113,6 +113,9 @@ def create_common_data(
             request.source_type
         ),
         "authentication_method_key": method_key,
+        "data_format": normalize_key(
+            request.data_format
+        ),
         "enabled": request.enabled,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
@@ -129,6 +132,8 @@ def delete_connection_fields(data: dict) -> None:
         "client_secret": firestore.DELETE_FIELD,
         "token_url": firestore.DELETE_FIELD,
         "scope": firestore.DELETE_FIELD,
+        "retrieval_type": firestore.DELETE_FIELD,
+        "data_format": firestore.DELETE_FIELD,
     })
 
 

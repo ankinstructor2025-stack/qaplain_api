@@ -32,7 +32,6 @@ class DataSourceRequest(BaseModel):
     endpoint_url: str | None = None
     http_method: str | None = None
 
-    retrieval_type: str | None = None
     data_format: str | None = None
 
     file_extensions: list[str] = Field(
@@ -122,10 +121,6 @@ def validate_data_source_request(
         request.authentication_method_key
     )
 
-    retrieval_type = normalize_key(
-        request.retrieval_type
-    )
-
     data_format = normalize_key(
         request.data_format
     )
@@ -165,29 +160,20 @@ def validate_data_source_request(
                 detail="接続先URLを入力してください。"
             )
 
-        if retrieval_type not in (
-            "structured_data",
+        if data_format not in (
+            "json",
+            "xml",
             "file"
         ):
             raise HTTPException(
                 status_code=400,
-                detail="取得方式を選択してください。"
+                detail=(
+                    "データ形式はJSON、XML、"
+                    "ファイルのいずれかを選択してください。"
+                )
             )
 
-        if retrieval_type == "structured_data":
-            if data_format not in (
-                "json",
-                "xml"
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "データ形式はJSONまたは"
-                        "XMLを選択してください。"
-                    )
-                )
-
-        if retrieval_type == "file":
+        if data_format == "file":
             validate_file_extensions(
                 request.file_extensions
             )
@@ -200,7 +186,6 @@ def validate_data_source_request(
     validate_parameters(
         request.parameters
     )
-
 
 def validate_file_extensions(
     file_extensions: list[str]
@@ -412,12 +397,7 @@ def create_parent_data(
             data["authentication_method_key"] = (
                 "file_upload"
             )
-            data["retrieval_type"] = "file"
-            data["data_format"] = (
-                firestore.DELETE_FIELD
-                if is_update
-                else None
-            )
+            data["data_format"] = "file"
 
         if is_update:
             clear_external_connection_fields(
@@ -425,13 +405,13 @@ def create_parent_data(
             )
 
             if source_type == "file":
-                data["retrieval_type"] = "file"
-                data["data_format"] = (
-                    firestore.DELETE_FIELD
-                )
+                data["data_format"] = "file"
 
             if source_type == "mail":
                 data["authentication_method_key"] = (
+                    firestore.DELETE_FIELD
+                )
+                data["data_format"] = (
                     firestore.DELETE_FIELD
                 )
 
@@ -455,30 +435,13 @@ def create_parent_data(
             method_key
         )
 
-        retrieval_type = normalize_key(
-            request.retrieval_type
+        data_format = normalize_key(
+            request.data_format
         )
 
-        data["retrieval_type"] = (
-            retrieval_type
-        )
+        data["data_format"] = data_format
 
-        if retrieval_type == "structured_data":
-            data["data_format"] = normalize_key(
-                request.data_format
-            )
-            data["file_extensions"] = (
-                firestore.DELETE_FIELD
-                if is_update
-                else []
-            )
-
-        if retrieval_type == "file":
-            data["data_format"] = (
-                firestore.DELETE_FIELD
-                if is_update
-                else None
-            )
+        if data_format == "file":
             data["file_extensions"] = list(
                 dict.fromkeys(
                     normalize_file_extension(
@@ -491,6 +454,18 @@ def create_parent_data(
                 )
             )
 
+        else:
+            data["file_extensions"] = (
+                firestore.DELETE_FIELD
+                if is_update
+                else []
+            )
+
+        if is_update:
+            data["retrieval_type"] = (
+                firestore.DELETE_FIELD
+            )
+
         set_authentication_data(
             data=data,
             request=request,
@@ -499,7 +474,6 @@ def create_parent_data(
         )
 
     return data
-
 
 def clear_external_connection_fields(
     data: dict
@@ -657,18 +631,6 @@ def serialize_data_source(
             data.get(
                 "http_method",
                 ""
-            ),
-
-        "retrieval_type":
-            data.get(
-                "retrieval_type",
-                (
-                    "file"
-                    if data.get(
-                        "source_type"
-                    ) == "file"
-                    else ""
-                )
             ),
 
         "data_format":

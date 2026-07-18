@@ -23,6 +23,8 @@ def create_file_upload_data(
 
     delete_connection_fields(data)
 
+    data["data_format"] = "file"
+
     data["file_extensions"] = (
         validate_file_extensions(
             request.file_extensions
