@@ -16,8 +16,10 @@ router = APIRouter(
     tags=["admin-users"],
 )
 
+
 ADMIN_COLLECTION = "admin_users"
 GENERAL_COLLECTION = "general_users"
+TENANT_COLLECTION = "tenants"
 
 
 class AdminUserRequest(BaseModel):
@@ -25,10 +27,17 @@ class AdminUserRequest(BaseModel):
         min_length=1,
         max_length=100,
     )
+
     email: str = Field(
         min_length=1,
         max_length=200,
     )
+
+    tenant_id: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
     start_date: str
     end_date: Optional[str] = None
 
@@ -39,16 +48,25 @@ def now_iso() -> str:
     ).isoformat()
 
 
+def normalize_text(
+    value,
+) -> str:
+    return str(
+        value or ""
+    ).strip()
+
+
 def normalize_email(
     email: str,
 ) -> str:
-    return email.strip().lower()
+    return normalize_text(
+        email
+    ).lower()
 
 
 def normalize_end_date(
     end_date: Optional[str],
 ) -> Optional[str]:
-
     if not end_date:
         return None
 
@@ -59,8 +77,16 @@ def validate_date_range(
     start_date: str,
     end_date: Optional[str],
 ) -> None:
+    if not start_date:
+        raise HTTPException(
+            status_code=400,
+            detail="利用開始日を入力してください。",
+        )
 
-    if end_date and start_date > end_date:
+    if (
+        end_date
+        and start_date > end_date
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -73,8 +99,9 @@ def validate_date_range(
 def authenticate_system_administrator(
     authorization: str,
 ) -> dict:
-
-    if not authorization.startswith("Bearer "):
+    if not authorization.startswith(
+        "Bearer "
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid Authorization header",
@@ -91,26 +118,29 @@ def authenticate_system_administrator(
             id_token
         )
 
-    except Exception as e:
-
+    except Exception as error:
         print(
-            f"verify_id_token error: "
-            f"{type(e).__name__}: {e}"
+            "verify_id_token error: "
+            f"{type(error).__name__}: "
+            f"{error}"
         )
 
         raise HTTPException(
             status_code=401,
-            detail=f"{type(e).__name__}: {e}",
+            detail="認証情報を確認できませんでした。",
         )
 
     email = normalize_email(
-        decoded_token.get("email", "")
+        decoded_token.get(
+            "email",
+            "",
+        )
     )
 
     if not email:
         raise HTTPException(
             status_code=401,
-            detail="Email is not available",
+            detail="メールアドレスを取得できませんでした。",
         )
 
     system_administrator = normalize_email(
@@ -138,21 +168,28 @@ def authenticate_system_administrator(
             ),
         )
 
-    return decoded_token
+    return {
+        **decoded_token,
+        "email":
+            email,
+    }
 
 
 def get_document_by_email(
     collection_name: str,
     email: str,
 ):
-    db = get_firestore_client()
-
     documents = (
-        db.collection(collection_name)
+        get_firestore_client()
+        .collection(
+            collection_name
+        )
         .where(
             "email",
             "==",
-            normalize_email(email),
+            normalize_email(
+                email
+            ),
         )
         .limit(1)
         .stream()
@@ -164,11 +201,72 @@ def get_document_by_email(
     )
 
 
+def get_tenant_document(
+    tenant_id: str,
+):
+    normalized_tenant_id = normalize_text(
+        tenant_id
+    )
+
+    if not normalized_tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="テナントを選択してください。",
+        )
+
+    document = (
+        get_firestore_client()
+        .collection(
+            TENANT_COLLECTION
+        )
+        .document(
+            normalized_tenant_id
+        )
+        .get()
+    )
+
+    if not document.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="指定されたテナントが見つかりません。",
+        )
+
+    return document
+
+
+def tenant_to_dict(
+    document,
+) -> dict:
+    data = document.to_dict() or {}
+
+    return {
+        "tenant_id":
+            document.id,
+        "tenant_name":
+            data.get(
+                "tenant_name",
+                "",
+            ),
+        "parent_user":
+            data.get(
+                "parent_user",
+                "",
+            ),
+        "start_date":
+            data.get(
+                "start_date"
+            ),
+        "end_date":
+            data.get(
+                "end_date"
+            ),
+    }
+
+
 def check_duplicate_email(
     email: str,
     exclude_id: Optional[str] = None,
 ) -> None:
-
     document = get_document_by_email(
         ADMIN_COLLECTION,
         email,
@@ -187,136 +285,253 @@ def check_duplicate_email(
         )
 
 
+def get_tenant_name(
+    tenant_id: str,
+) -> str:
+    if not tenant_id:
+        return ""
+
+    document = (
+        get_firestore_client()
+        .collection(
+            TENANT_COLLECTION
+        )
+        .document(
+            tenant_id
+        )
+        .get()
+    )
+
+    if not document.exists:
+        return ""
+
+    return (
+        document.to_dict()
+        or {}
+    ).get(
+        "tenant_name",
+        "",
+    )
+
+
 def document_to_dict(
     document,
 ) -> dict:
-
     data = document.to_dict() or {}
 
+    tenant_id = normalize_text(
+        data.get(
+            "tenant_id",
+            "",
+        )
+    )
+
     return {
-        "id": document.id,
-        "user_name": data.get(
-            "user_name",
-            "",
-        ),
-        "email": data.get(
-            "email",
-            "",
-        ),
-        "start_date": data.get(
-            "start_date"
-        ),
-        "end_date": data.get(
-            "end_date"
-        ),
-        "created_at": data.get(
-            "created_at"
-        ),
-        "updated_at": data.get(
-            "updated_at"
-        ),
+        "id":
+            document.id,
+        "user_name":
+            data.get(
+                "user_name",
+                "",
+            ),
+        "email":
+            data.get(
+                "email",
+                "",
+            ),
+        "tenant_id":
+            tenant_id,
+        "tenant_name":
+            get_tenant_name(
+                tenant_id
+            ),
+        "start_date":
+            data.get(
+                "start_date"
+            ),
+        "end_date":
+            data.get(
+                "end_date"
+            ),
+        "created_at":
+            data.get(
+                "created_at"
+            ),
+        "updated_at":
+            data.get(
+                "updated_at"
+            ),
     }
 
 
 def sync_general_user(
     db,
+    *,
     user_name: str,
     email: str,
+    tenant_id: str,
     start_date: str,
     end_date: Optional[str],
     updated_at: str,
 ) -> None:
-
     document = get_document_by_email(
         GENERAL_COLLECTION,
         email,
     )
 
     data = {
-        "user_name": user_name,
-        "email": email,
-        "user_type": "ADMIN",
-        "parent_user": email,
-        "start_date": start_date,
-        "end_date": end_date,
-        "updated_at": updated_at,
+        "user_name":
+            user_name,
+        "email":
+            email,
+        "tenant_id":
+            tenant_id,
+        "user_type":
+            "ADMIN",
+        "parent_user":
+            email,
+        "start_date":
+            start_date,
+        "end_date":
+            end_date,
+        "updated_at":
+            updated_at,
     }
 
     if document:
-
         document.reference.set(
             data,
             merge=True,
         )
-
         return
 
-    data["created_at"] = updated_at
+    data["created_at"] = (
+        updated_at
+    )
 
-    db.collection(
-        GENERAL_COLLECTION
-    ).document().set(data)
+    (
+        db.collection(
+            GENERAL_COLLECTION
+        )
+        .document()
+        .set(
+            data
+        )
+    )
 
 
-def delete_general_user_by_email(
+def delete_general_users_for_admin(
     db,
+    *,
     email: str,
+    tenant_id: str,
 ) -> None:
-
     documents = (
-        db.collection(GENERAL_COLLECTION)
+        db.collection(
+            GENERAL_COLLECTION
+        )
         .where(
-            "email",
+            "tenant_id",
             "==",
-            normalize_email(email),
+            tenant_id,
         )
         .stream()
     )
 
     for document in documents:
-        document.reference.delete()
+        data = document.to_dict() or {}
+
+        if (
+            normalize_email(
+                data.get(
+                    "parent_user",
+                    "",
+                )
+            )
+            == email
+        ):
+            document.reference.delete()
+
+
+@router.get(
+    "/available-tenants"
+)
+def get_available_tenants(
+    authorization: str = Header(...),
+):
+    authenticate_system_administrator(
+        authorization
+    )
+
+    documents = (
+        get_firestore_client()
+        .collection(
+            TENANT_COLLECTION
+        )
+        .order_by(
+            "tenant_name"
+        )
+        .stream()
+    )
+
+    return {
+        "tenants": [
+            tenant_to_dict(
+                document
+            )
+            for document in documents
+        ]
+    }
 
 
 @router.get("")
 def get_admin_users(
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(
         authorization
     )
 
-    db = get_firestore_client()
-
     documents = (
-        db.collection(ADMIN_COLLECTION)
-        .order_by("user_name")
+        get_firestore_client()
+        .collection(
+            ADMIN_COLLECTION
+        )
+        .order_by(
+            "user_name"
+        )
         .stream()
     )
 
     return {
         "users": [
-            document_to_dict(document)
+            document_to_dict(
+                document
+            )
             for document in documents
         ]
     }
 
 
-@router.get("/{admin_user_id}")
+@router.get(
+    "/{admin_user_id}"
+)
 def get_admin_user(
     admin_user_id: str,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(
         authorization
     )
 
-    db = get_firestore_client()
-
     document = (
-        db.collection(ADMIN_COLLECTION)
-        .document(admin_user_id)
+        get_firestore_client()
+        .collection(
+            ADMIN_COLLECTION
+        )
+        .document(
+            admin_user_id
+        )
         .get()
     )
 
@@ -342,7 +557,6 @@ def create_admin_user(
     request: AdminUserRequest,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(
         authorization
     )
@@ -350,6 +564,9 @@ def create_admin_user(
     user_name = request.user_name.strip()
     email = normalize_email(
         request.email
+    )
+    tenant_id = normalize_text(
+        request.tenant_id
     )
     start_date = request.start_date.strip()
     end_date = normalize_end_date(
@@ -361,6 +578,10 @@ def create_admin_user(
         end_date,
     )
 
+    get_tenant_document(
+        tenant_id
+    )
+
     check_duplicate_email(
         email
     )
@@ -368,18 +589,28 @@ def create_admin_user(
     now = now_iso()
 
     data = {
-        "user_name": user_name,
-        "email": email,
-        "start_date": start_date,
-        "end_date": end_date,
-        "created_at": now,
-        "updated_at": now,
+        "user_name":
+            user_name,
+        "email":
+            email,
+        "tenant_id":
+            tenant_id,
+        "start_date":
+            start_date,
+        "end_date":
+            end_date,
+        "created_at":
+            now,
+        "updated_at":
+            now,
     }
 
     db = get_firestore_client()
 
     document_reference = (
-        db.collection(ADMIN_COLLECTION)
+        db.collection(
+            ADMIN_COLLECTION
+        )
         .document()
     )
 
@@ -388,27 +619,30 @@ def create_admin_user(
     )
 
     sync_general_user(
-        db=db,
+        db,
         user_name=user_name,
         email=email,
+        tenant_id=tenant_id,
         start_date=start_date,
         end_date=end_date,
         updated_at=now,
     )
 
     return {
-        "id": document_reference.id,
+        "id":
+            document_reference.id,
         **data,
     }
 
 
-@router.put("/{admin_user_id}")
+@router.put(
+    "/{admin_user_id}"
+)
 def update_admin_user(
     admin_user_id: str,
     request: AdminUserRequest,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(
         authorization
     )
@@ -416,8 +650,12 @@ def update_admin_user(
     db = get_firestore_client()
 
     document_reference = (
-        db.collection(ADMIN_COLLECTION)
-        .document(admin_user_id)
+        db.collection(
+            ADMIN_COLLECTION
+        )
+        .document(
+            admin_user_id
+        )
     )
 
     document = document_reference.get()
@@ -431,7 +669,10 @@ def update_admin_user(
             ),
         )
 
-    current = document.to_dict() or {}
+    current = (
+        document.to_dict()
+        or {}
+    )
 
     current_email = normalize_email(
         current.get(
@@ -446,7 +687,9 @@ def update_admin_user(
     )
 
     if (
-        normalize_email(request.email)
+        normalize_email(
+            request.email
+        )
         != current_email
     ):
         raise HTTPException(
@@ -469,6 +712,14 @@ def update_admin_user(
             ),
         )
 
+    tenant_id = normalize_text(
+        request.tenant_id
+    )
+
+    get_tenant_document(
+        tenant_id
+    )
+
     user_name = request.user_name.strip()
 
     end_date = normalize_end_date(
@@ -483,15 +734,21 @@ def update_admin_user(
     now = now_iso()
 
     document_reference.update({
-        "user_name": user_name,
-        "end_date": end_date,
-        "updated_at": now,
+        "user_name":
+            user_name,
+        "tenant_id":
+            tenant_id,
+        "end_date":
+            end_date,
+        "updated_at":
+            now,
     })
 
     sync_general_user(
-        db=db,
+        db,
         user_name=user_name,
         email=current_email,
+        tenant_id=tenant_id,
         start_date=current_start_date,
         end_date=end_date,
         updated_at=now,
@@ -502,12 +759,13 @@ def update_admin_user(
     )
 
 
-@router.delete("/{admin_user_id}")
+@router.delete(
+    "/{admin_user_id}"
+)
 def delete_admin_user(
     admin_user_id: str,
     authorization: str = Header(...),
 ):
-
     authenticate_system_administrator(
         authorization
     )
@@ -515,8 +773,12 @@ def delete_admin_user(
     db = get_firestore_client()
 
     document_reference = (
-        db.collection(ADMIN_COLLECTION)
-        .document(admin_user_id)
+        db.collection(
+            ADMIN_COLLECTION
+        )
+        .document(
+            admin_user_id
+        )
     )
 
     document = document_reference.get()
@@ -530,34 +792,37 @@ def delete_admin_user(
             ),
         )
 
+    current = (
+        document.to_dict()
+        or {}
+    )
+
     email = normalize_email(
-        (document.to_dict() or {}).get(
+        current.get(
             "email",
             "",
         )
     )
 
-    child_documents = (
-        db.collection(GENERAL_COLLECTION)
-        .where(
-            "parent_user",
-            "==",
-            email,
+    tenant_id = normalize_text(
+        current.get(
+            "tenant_id",
+            "",
         )
-        .stream()
     )
 
-    for child_document in child_documents:
-        child_document.reference.delete()
+    if tenant_id:
+        delete_general_users_for_admin(
+            db,
+            email=email,
+            tenant_id=tenant_id,
+        )
 
     document_reference.delete()
 
-    delete_general_user_by_email(
-        db,
-        email,
-    )
-
     return {
-        "status": "deleted",
-        "id": admin_user_id,
+        "status":
+            "deleted",
+        "id":
+            admin_user_id,
     }
