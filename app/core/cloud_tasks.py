@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from google.auth.transport import requests as google_auth_requests
+from google.api_core.exceptions import AlreadyExists, NotFound
 from google.cloud import tasks_v2
 from google.oauth2 import id_token as google_id_token
 from google.protobuf.field_mask_pb2 import FieldMask
@@ -154,6 +155,10 @@ def ensure_task_queue(
         CLOUD_TASKS_LOCATION,
         queue_id,
     )
+    parent = client.common_location_path(
+        CLOUD_TASKS_PROJECT,
+        CLOUD_TASKS_LOCATION,
+    )
 
     queue = tasks_v2.Queue(
         name=queue_full_name,
@@ -166,6 +171,25 @@ def ensure_task_queue(
             ),
         ),
     )
+
+    try:
+        client.get_queue(
+            request={
+                "name": queue_full_name,
+            }
+        )
+
+    except NotFound:
+        try:
+            client.create_queue(
+                request={
+                    "parent": parent,
+                    "queue": queue,
+                }
+            )
+
+        except AlreadyExists:
+            pass
 
     updated_queue = client.update_queue(
         request={
