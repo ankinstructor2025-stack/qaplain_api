@@ -32,8 +32,6 @@ class DataSourceRequest(BaseModel):
     endpoint_url: str | None = None
     http_method: str | None = None
 
-    data_format: str | None = None
-
     file_extensions: list[str] = Field(
         default_factory=list
     )
@@ -121,10 +119,6 @@ def validate_data_source_request(
         request.authentication_method_key
     )
 
-    data_format = normalize_key(
-        request.data_format
-    )
-
     if source_type == "file":
         if method_key != "file_upload":
             raise HTTPException(
@@ -158,24 +152,6 @@ def validate_data_source_request(
             raise HTTPException(
                 status_code=400,
                 detail="接続先URLを入力してください。"
-            )
-
-        if data_format not in (
-            "json",
-            "xml",
-            "file"
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "データ形式はJSON、XML、"
-                    "ファイルのいずれかを選択してください。"
-                )
-            )
-
-        if data_format == "file":
-            validate_file_extensions(
-                request.file_extensions
             )
 
         validate_authentication(
@@ -397,21 +373,14 @@ def create_parent_data(
             data["authentication_method_key"] = (
                 "file_upload"
             )
-            data["data_format"] = "file"
 
         if is_update:
             clear_external_connection_fields(
                 data
             )
 
-            if source_type == "file":
-                data["data_format"] = "file"
-
             if source_type == "mail":
                 data["authentication_method_key"] = (
-                    firestore.DELETE_FIELD
-                )
-                data["data_format"] = (
                     firestore.DELETE_FIELD
                 )
 
@@ -435,34 +404,17 @@ def create_parent_data(
             method_key
         )
 
-        data_format = normalize_key(
-            request.data_format
+        data["file_extensions"] = (
+            firestore.DELETE_FIELD
+            if is_update
+            else []
         )
-
-        data["data_format"] = data_format
-
-        if data_format == "file":
-            data["file_extensions"] = list(
-                dict.fromkeys(
-                    normalize_file_extension(
-                        extension
-                    )
-                    for extension in request.file_extensions
-                    if normalize_file_extension(
-                        extension
-                    )
-                )
-            )
-
-        else:
-            data["file_extensions"] = (
-                firestore.DELETE_FIELD
-                if is_update
-                else []
-            )
 
         if is_update:
             data["retrieval_type"] = (
+                firestore.DELETE_FIELD
+            )
+            data["data_format"] = (
                 firestore.DELETE_FIELD
             )
 
@@ -632,13 +584,6 @@ def serialize_data_source(
                 "http_method",
                 ""
             ),
-
-        "data_format":
-            data.get(
-                "data_format",
-                ""
-            ),
-
         "file_extensions":
             data.get(
                 "file_extensions",

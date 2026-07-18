@@ -113,9 +113,6 @@ def create_common_data(
             request.source_type
         ),
         "authentication_method_key": method_key,
-        "data_format": normalize_key(
-            request.data_format
-        ),
         "enabled": request.enabled,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
