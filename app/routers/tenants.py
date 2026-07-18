@@ -51,6 +51,12 @@ class TenantRequest(BaseModel):
 
     end_date: Optional[str] = None
 
+    task_concurrency: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+    )
+
     openai_api_key: Optional[str] = None
 
     gemini_api_key: Optional[str] = None
@@ -502,6 +508,10 @@ def document_to_dict(
         "end_date": data.get(
             "end_date"
         ),
+        "task_concurrency": data.get(
+            "task_concurrency",
+            1,
+        ),
         "created_at": data.get(
             "created_at"
         ),
@@ -671,6 +681,10 @@ def create_tenant(
         request.end_date
     )
 
+    task_concurrency = (
+        request.task_concurrency
+    )
+
     openai_api_key = normalize_api_key(
         request.openai_api_key
     )
@@ -696,6 +710,7 @@ def create_tenant(
         "parent_user": parent_user,
         "start_date": start_date,
         "end_date": end_date,
+        "task_concurrency": task_concurrency,
         OPENAI_API_KEY_FIELD:
             encrypt_api_key(
                 openai_api_key
@@ -788,6 +803,10 @@ def update_tenant(
         request.end_date
     )
 
+    task_concurrency = (
+        request.task_concurrency
+    )
+
     openai_api_key = normalize_api_key(
         request.openai_api_key
     )
@@ -810,6 +829,7 @@ def update_tenant(
     update_data = {
         "tenant_name": tenant_name,
         "end_date": end_date,
+        "task_concurrency": task_concurrency,
         OPENAI_API_KEY_FIELD:
             encrypt_api_key(
                 openai_api_key
