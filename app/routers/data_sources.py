@@ -16,6 +16,7 @@ router = APIRouter(
 DATA_SOURCE_COLLECTION = "data_sources"
 PARAMETER_COLLECTION = "parameters"
 FILE_TYPE_COLLECTION = "supported_file_types"
+TENANT_COLLECTION = "tenants"
 
 
 class DataSourceParameterRequest(BaseModel):
@@ -26,6 +27,7 @@ class DataSourceParameterRequest(BaseModel):
 
 
 class DataSourceRequest(BaseModel):
+    tenant_id: str
     data_source_name: str
     source_type: str
 
@@ -86,10 +88,47 @@ def normalize_file_extension(
     )
 
 
+def validate_tenant_id(
+    tenant_id: str | None
+) -> str:
+    normalized_tenant_id = normalize_text(
+        tenant_id
+    )
+
+    if not normalized_tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="テナントを選択してください。"
+        )
+
+    document = (
+        get_db()
+        .collection(
+            TENANT_COLLECTION
+        )
+        .document(
+            normalized_tenant_id
+        )
+        .get()
+    )
+
+    if not document.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="選択したテナントが見つかりません。"
+        )
+
+    return normalized_tenant_id
+
+
 def validate_data_source_request(
     request: DataSourceRequest,
     is_update: bool
 ):
+    validate_tenant_id(
+        request.tenant_id
+    )
+
     data_source_name = normalize_text(
         request.data_source_name
     )
@@ -338,6 +377,11 @@ def create_parent_data(
     )
 
     data = {
+        "tenant_id":
+            validate_tenant_id(
+                request.tenant_id
+            ),
+
         "data_source_name":
             normalize_text(
                 request.data_source_name
@@ -560,6 +604,12 @@ def serialize_data_source(
     return {
         "data_source_id":
             document.id,
+
+        "tenant_id":
+            data.get(
+                "tenant_id",
+                ""
+            ),
 
         "data_source_name":
             data.get(

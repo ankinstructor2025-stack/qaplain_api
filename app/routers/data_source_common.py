@@ -8,6 +8,7 @@ from app.core.firebase import get_firestore_client
 
 AUTHENTICATION_METHOD_COLLECTION = "authentication_methods"
 FILE_TYPE_COLLECTION = "supported_file_types"
+TENANT_COLLECTION = "tenants"
 
 
 def normalize_text(value: Any) -> str:
@@ -20,6 +21,35 @@ def normalize_key(value: Any) -> str:
 
 def normalize_file_extension(value: Any) -> str:
     return normalize_text(value).lower().lstrip(".")
+
+
+def validate_tenant_id(
+    tenant_id: Any,
+) -> str:
+    normalized_tenant_id = normalize_text(
+        tenant_id
+    )
+
+    if not normalized_tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="テナントを選択してください。",
+        )
+
+    document = (
+        get_firestore_client()
+        .collection(TENANT_COLLECTION)
+        .document(normalized_tenant_id)
+        .get()
+    )
+
+    if not document.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="選択したテナントが見つかりません。",
+        )
+
+    return normalized_tenant_id
 
 
 def get_authentication_method(method_key: str) -> dict:
@@ -106,6 +136,9 @@ def create_common_data(
     method_key: str,
 ) -> dict:
     return {
+        "tenant_id": validate_tenant_id(
+            request.tenant_id
+        ),
         "data_source_name": normalize_text(
             request.data_source_name
         ),
