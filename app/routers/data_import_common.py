@@ -902,7 +902,6 @@ def get_tenant_task_queue_config(
         queue_config = ensure_task_queue(
             identifier=tenant_id,
             concurrency=task_concurrency,
-            prefix="data-import",
         )
     except Exception as error:
         print(
