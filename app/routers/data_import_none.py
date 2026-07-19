@@ -1,3 +1,4 @@
+import html
 import json
 import re
 import uuid
@@ -105,6 +106,66 @@ def build_requested_url(
     )
 
 
+def normalize_response_content_type(
+    raw_content_type: str | None,
+) -> str:
+    return (
+        str(
+            raw_content_type
+            or "application/octet-stream"
+        )
+        .split(
+            ";",
+            1,
+        )[0]
+        .strip()
+        .lower()
+    )
+
+
+def build_external_error_detail(
+    content: bytes,
+    content_type: str,
+    max_characters: int = 1000,
+) -> str:
+    decoded_text = content.decode(
+        "utf-8",
+        errors="replace",
+    )
+
+    if content_type == "text/html":
+        decoded_text = re.sub(
+            r"<script[\\s\\S]*?</script>",
+            " ",
+            decoded_text,
+            flags=re.IGNORECASE,
+        )
+        decoded_text = re.sub(
+            r"<style[\\s\\S]*?</style>",
+            " ",
+            decoded_text,
+            flags=re.IGNORECASE,
+        )
+        decoded_text = re.sub(
+            r"<[^>]+>",
+            " ",
+            decoded_text,
+        )
+        decoded_text = html.unescape(
+            decoded_text
+        )
+
+    decoded_text = re.sub(
+        r"\\s+",
+        " ",
+        decoded_text,
+    ).strip()
+
+    return decoded_text[
+        :max_characters
+    ]
+
+
 def request_external_data(
     requested_url: str,
 ) -> tuple[bytes, int, str]:
@@ -113,10 +174,20 @@ def request_external_data(
         method="GET",
         headers={
             "User-Agent":
-                "QAPlain-Knowledge-Studio/1.0",
+                "Mozilla/5.0 "
+                "(compatible; QAPlain-Knowledge-Studio/1.0)",
 
             "Accept":
-                "*/*",
+                (
+                    "application/json, "
+                    "application/xml, "
+                    "text/xml, "
+                    "text/csv, "
+                    "text/plain, "
+                    "application/pdf, "
+                    "application/zip, "
+                    "*/*;q=0.8"
+                ),
         },
     )
 
@@ -132,31 +203,39 @@ def request_external_data(
             )
 
             content_type = (
-                response.headers.get(
-                    "Content-Type",
-                    "application/octet-stream",
+                normalize_response_content_type(
+                    response.headers.get(
+                        "Content-Type"
+                    )
                 )
-                .split(
-                    ";",
-                    1,
-                )[0]
-                .strip()
-                .lower()
-            )
-
-            return (
-                content,
-                status,
-                content_type,
             )
 
     except HTTPError as error:
-        response_body = (
-            error.read()
-            .decode(
-                "utf-8",
-                errors="replace",
+        error_content = error.read()
+
+        content_type = (
+            normalize_response_content_type(
+                error.headers.get(
+                    "Content-Type"
+                )
+                if error.headers
+                else None
             )
+        )
+
+        external_detail = (
+            build_external_error_detail(
+                content=error_content,
+                content_type=content_type,
+            )
+        )
+
+        print(
+            "external API HTTP error: "
+            f"status={error.code}, "
+            f"content_type={content_type}, "
+            f"url={requested_url}, "
+            f"detail={external_detail}"
         )
 
         raise HTTPException(
@@ -168,19 +247,33 @@ def request_external_data(
                 "external_status":
                     error.code,
 
+                "external_content_type":
+                    content_type,
+
                 "external_detail":
-                    response_body[:1000],
+                    (
+                        external_detail
+                        or "エラー内容を取得できませんでした。"
+                    ),
             },
         )
 
     except URLError as error:
         raise HTTPException(
             status_code=502,
-            detail=(
-                "接続先APIへ接続できませんでした。"
-                f" {error.reason}"
-            ),
+            detail={
+                "message":
+                    "接続先APIへ接続できませんでした。",
+
+                "external_detail":
+                    str(
+                        error.reason
+                    ),
+            },
         )
+
+    except HTTPException:
+        raise
 
     except Exception as error:
         print(
@@ -193,6 +286,53 @@ def request_external_data(
             status_code=502,
             detail="外部データの取得に失敗しました。",
         )
+
+    if status < 200 or status >= 300:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "接続先APIから正常でない応答が返されました。",
+
+                "external_status":
+                    status,
+
+                "external_content_type":
+                    content_type,
+            },
+        )
+
+    if content_type == "text/html":
+        external_detail = (
+            build_external_error_detail(
+                content=content,
+                content_type=content_type,
+            )
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "接続先APIがHTMLを返しました。"
+                    " URLまたは接続条件を確認してください。",
+
+                "external_status":
+                    status,
+
+                "external_content_type":
+                    content_type,
+
+                "external_detail":
+                    external_detail,
+            },
+        )
+
+    return (
+        content,
+        status,
+        content_type,
+    )
 
 
 def get_extension(
