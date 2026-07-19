@@ -238,6 +238,11 @@ def create_http_task(
 ) -> tasks_v2.Task:
     validate_cloud_tasks_settings()
 
+    print(
+        "CLOUD_TASKS_WORKER_URL="
+        f"{CLOUD_TASKS_WORKER_URL!r}"
+    )
+
     target_url = normalize_text(
         worker_url or CLOUD_TASKS_WORKER_URL
     )
