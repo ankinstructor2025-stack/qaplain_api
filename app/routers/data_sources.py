@@ -5,6 +5,17 @@ from firebase_admin import firestore
 from pydantic import BaseModel, Field
 
 from app.core.firebase import get_firestore_client
+from app.routers.data_source_common import (
+    create_common_data,
+    delete_connection_fields,
+    normalize_file_extension,
+    normalize_key,
+    normalize_text,
+    set_external_connection_data,
+    validate_file_extensions,
+    validate_processing_pattern,
+    validate_tenant_id,
+)
 
 
 router = APIRouter(
@@ -15,8 +26,6 @@ router = APIRouter(
 
 DATA_SOURCE_COLLECTION = "data_sources"
 PARAMETER_COLLECTION = "parameters"
-FILE_TYPE_COLLECTION = "supported_file_types"
-TENANT_COLLECTION = "tenants"
 
 
 class DataSourceParameterRequest(BaseModel):
@@ -30,6 +39,7 @@ class DataSourceRequest(BaseModel):
     tenant_id: str
     data_source_name: str
     source_type: str
+    processing_pattern: str = "raw"
 
     endpoint_url: str | None = None
     http_method: str | None = None
@@ -57,68 +67,6 @@ class DataSourceRequest(BaseModel):
 
 def get_db():
     return get_firestore_client()
-
-
-def normalize_text(
-    value: str | None
-) -> str:
-    return str(
-        value or ""
-    ).strip()
-
-
-def normalize_key(
-    value: str | None
-) -> str:
-    return normalize_text(
-        value
-    ).lower().replace(
-        "-",
-        "_"
-    )
-
-
-def normalize_file_extension(
-    value: str | None
-) -> str:
-    return normalize_text(
-        value
-    ).lower().lstrip(
-        "."
-    )
-
-
-def validate_tenant_id(
-    tenant_id: str | None
-) -> str:
-    normalized_tenant_id = normalize_text(
-        tenant_id
-    )
-
-    if not normalized_tenant_id:
-        raise HTTPException(
-            status_code=400,
-            detail="テナントを選択してください。"
-        )
-
-    document = (
-        get_db()
-        .collection(
-            TENANT_COLLECTION
-        )
-        .document(
-            normalized_tenant_id
-        )
-        .get()
-    )
-
-    if not document.exists:
-        raise HTTPException(
-            status_code=400,
-            detail="選択したテナントが見つかりません。"
-        )
-
-    return normalized_tenant_id
 
 
 def validate_data_source_request(
@@ -198,76 +146,13 @@ def validate_data_source_request(
             is_update=is_update
         )
 
+    validate_processing_pattern(
+        request.processing_pattern
+    )
+
     validate_parameters(
         request.parameters
     )
-
-def validate_file_extensions(
-    file_extensions: list[str]
-):
-    normalized_extensions = []
-
-    for extension in file_extensions:
-        normalized_extension = (
-            normalize_file_extension(
-                extension
-            )
-        )
-
-        if (
-            normalized_extension
-            and normalized_extension
-            not in normalized_extensions
-        ):
-            normalized_extensions.append(
-                normalized_extension
-            )
-
-    if not normalized_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "対象拡張子を"
-                "1つ以上選択してください。"
-            )
-        )
-
-    db = get_db()
-
-    for extension in normalized_extensions:
-        document = (
-            db.collection(
-                FILE_TYPE_COLLECTION
-            )
-            .document(
-                extension
-            )
-            .get()
-        )
-
-        if not document.exists:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f".{extension}は"
-                    "拡張子管理に登録されていません。"
-                )
-            )
-
-        data = document.to_dict() or {}
-
-        if data.get(
-            "enabled",
-            True
-        ) is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f".{extension}は"
-                    "無効な拡張子です。"
-                )
-            )
-
 
 def validate_authentication(
     request: DataSourceRequest,
@@ -376,52 +261,40 @@ def create_parent_data(
         request.authentication_method_key
     )
 
-    data = {
-        "tenant_id":
-            validate_tenant_id(
-                request.tenant_id
-            ),
+    common_method_key = (
+        "file_upload"
+        if source_type == "file"
+        else method_key
+        if source_type in ("url", "api")
+        else ""
+    )
 
-        "data_source_name":
-            normalize_text(
-                request.data_source_name
-            ),
-
-        "source_type":
-            source_type,
-
-        "enabled":
-            request.enabled,
-
-        "updated_at":
-            firestore.SERVER_TIMESTAMP
-    }
+    data = create_common_data(
+        request=request,
+        method_key=common_method_key,
+    )
 
     if source_type in (
         "file",
         "mail"
     ):
-        data["file_extensions"] = list(
-            dict.fromkeys(
-                normalize_file_extension(
-                    extension
-                )
-                for extension in request.file_extensions
-                if normalize_file_extension(
-                    extension
+        if source_type == "file":
+            data["file_extensions"] = (
+                validate_file_extensions(
+                    request.file_extensions
                 )
             )
-        )
-
-        if source_type == "file":
-            data["authentication_method_key"] = (
-                "file_upload"
+        else:
+            data["file_extensions"] = list(
+                dict.fromkeys(
+                    normalize_file_extension(extension)
+                    for extension in request.file_extensions
+                    if normalize_file_extension(extension)
+                )
             )
 
         if is_update:
-            clear_external_connection_fields(
-                data
-            )
+            delete_connection_fields(data)
 
             if source_type == "mail":
                 data["authentication_method_key"] = (
@@ -432,16 +305,9 @@ def create_parent_data(
         "url",
         "api"
     ):
-        data["endpoint_url"] = normalize_text(
-            request.endpoint_url
-        )
-
-        data["http_method"] = (
-            normalize_text(
-                request.http_method
-            ).upper()
-            if source_type == "api"
-            else "GET"
+        set_external_connection_data(
+            data=data,
+            request=request,
         )
 
         data["authentication_method_key"] = (
@@ -470,41 +336,6 @@ def create_parent_data(
         )
 
     return data
-
-def clear_external_connection_fields(
-    data: dict
-):
-    data.update({
-        "endpoint_url":
-            firestore.DELETE_FIELD,
-
-        "http_method":
-            firestore.DELETE_FIELD,
-
-        "username":
-            firestore.DELETE_FIELD,
-
-        "password":
-            firestore.DELETE_FIELD,
-
-        "client_id":
-            firestore.DELETE_FIELD,
-
-        "client_secret":
-            firestore.DELETE_FIELD,
-
-        "token_url":
-            firestore.DELETE_FIELD,
-
-        "scope":
-            firestore.DELETE_FIELD,
-
-        "retrieval_type":
-            firestore.DELETE_FIELD,
-
-        "data_format":
-            firestore.DELETE_FIELD
-    })
 
 
 def set_authentication_data(
@@ -621,6 +452,12 @@ def serialize_data_source(
             data.get(
                 "source_type",
                 ""
+            ),
+
+        "processing_pattern":
+            data.get(
+                "processing_pattern",
+                "raw"
             ),
 
         "endpoint_url":

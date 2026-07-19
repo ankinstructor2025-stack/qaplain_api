@@ -11,6 +11,15 @@ FILE_TYPE_COLLECTION = "supported_file_types"
 TENANT_COLLECTION = "tenants"
 
 
+PROCESSING_PATTERNS = {
+    "raw",
+    "json_list",
+    "parent_child",
+    "parent_child_grandchild",
+    "file_links",
+}
+
+
 def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -21,6 +30,18 @@ def normalize_key(value: Any) -> str:
 
 def normalize_file_extension(value: Any) -> str:
     return normalize_text(value).lower().lstrip(".")
+
+
+def validate_processing_pattern(value: Any) -> str:
+    processing_pattern = normalize_key(value) or "raw"
+
+    if processing_pattern not in PROCESSING_PATTERNS:
+        raise HTTPException(
+            status_code=400,
+            detail="処理方式が正しくありません。",
+        )
+
+    return processing_pattern
 
 
 def validate_tenant_id(
@@ -135,20 +156,31 @@ def create_common_data(
     request,
     method_key: str,
 ) -> dict:
-    return {
+    data = {
         "tenant_id": validate_tenant_id(
             request.tenant_id
         ),
         "data_source_name": normalize_text(
             request.data_source_name
         ),
-        "source_type": normalize_text(
+        "source_type": normalize_key(
             request.source_type
         ),
-        "authentication_method_key": method_key,
+        "processing_pattern": validate_processing_pattern(
+            getattr(request, "processing_pattern", "raw")
+        ),
         "enabled": request.enabled,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
+
+    normalized_method_key = normalize_key(method_key)
+
+    if normalized_method_key:
+        data["authentication_method_key"] = (
+            normalized_method_key
+        )
+
+    return data
 
 
 def delete_connection_fields(data: dict) -> None:
@@ -171,10 +203,15 @@ def set_external_connection_data(
     data: dict,
     request,
 ) -> None:
+    source_type = normalize_key(
+        request.source_type
+    )
+
     data["endpoint_url"] = normalize_text(
         request.endpoint_url
     )
     data["http_method"] = (
         normalize_text(request.http_method).upper()
-        or "GET"
-    )
+        if source_type == "api"
+        else "GET"
+    ) or "GET"
