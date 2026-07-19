@@ -169,19 +169,7 @@ def build_external_error_detail(
 def request_external_data(
     requested_url: str,
 ) -> tuple[bytes, int, str]:
-    request = Request(
-        requested_url,
-        method="GET",
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/138.0.0.0 Safari/537.36"
-            ),
-            "Accept": "*/*",
-            "Accept-Language": "ja,en;q=0.9",
-        },
-    )
+    import requests
 
     print(
         "external request URL: "
@@ -189,47 +177,71 @@ def request_external_data(
     )
 
     try:
-        with urlopen(
-            request,
+        response = requests.get(
+            requested_url,
             timeout=60,
-        ) as response:
-            content = response.read()
+        )
 
-            status = int(
-                response.status
-            )
+        content = response.content
+        status = int(response.status_code)
 
-            content_type = (
-                normalize_response_content_type(
-                    response.headers.get(
-                        "Content-Type"
-                    )
-                )
-            )
-
-    except HTTPError as error:
-        error_content = error.read()
-
-        content_type = (
-            normalize_response_content_type(
-                error.headers.get(
-                    "Content-Type"
-                )
-                if error.headers
-                else None
+        content_type = normalize_response_content_type(
+            response.headers.get(
+                "Content-Type"
             )
         )
 
-        external_detail = (
-            build_external_error_detail(
-                content=error_content,
-                content_type=content_type,
-            )
+    except requests.Timeout as error:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "接続先APIの応答がタイムアウトしました。",
+
+                "external_detail":
+                    str(error),
+            },
+        )
+
+    except requests.ConnectionError as error:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "接続先APIへ接続できませんでした。",
+
+                "external_detail":
+                    str(error),
+            },
+        )
+
+    except requests.RequestException as error:
+        print(
+            "external request error: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message":
+                    "外部データの取得に失敗しました。",
+
+                "external_detail":
+                    str(error),
+            },
+        )
+
+    if status < 200 or status >= 300:
+        external_detail = build_external_error_detail(
+            content=content,
+            content_type=content_type,
         )
 
         print(
             "external API HTTP error: "
-            f"status={error.code}, "
+            f"status={status}, "
             f"content_type={content_type}, "
             f"url={requested_url}, "
             f"detail={external_detail}"
@@ -242,7 +254,7 @@ def request_external_data(
                     "接続先APIからエラーが返されました。",
 
                 "external_status":
-                    error.code,
+                    status,
 
                 "external_content_type":
                     content_type,
@@ -255,56 +267,10 @@ def request_external_data(
             },
         )
 
-    except URLError as error:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message":
-                    "接続先APIへ接続できませんでした。",
-
-                "external_detail":
-                    str(
-                        error.reason
-                    ),
-            },
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as error:
-        print(
-            "external request error: "
-            f"{type(error).__name__}: "
-            f"{error}"
-        )
-
-        raise HTTPException(
-            status_code=502,
-            detail="外部データの取得に失敗しました。",
-        )
-
-    if status < 200 or status >= 300:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message":
-                    "接続先APIから正常でない応答が返されました。",
-
-                "external_status":
-                    status,
-
-                "external_content_type":
-                    content_type,
-            },
-        )
-
     if content_type == "text/html":
-        external_detail = (
-            build_external_error_detail(
-                content=content,
-                content_type=content_type,
-            )
+        external_detail = build_external_error_detail(
+            content=content,
+            content_type=content_type,
         )
 
         raise HTTPException(
