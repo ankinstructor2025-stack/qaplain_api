@@ -12,8 +12,10 @@ from app.routers.data_source_common import (
     normalize_key,
     normalize_text,
     set_external_connection_data,
+    set_processing_settings_data,
     validate_file_extensions,
     validate_processing_pattern,
+    validate_processing_settings,
     validate_tenant_id,
 )
 
@@ -40,6 +42,13 @@ class DataSourceRequest(BaseModel):
     data_source_name: str
     source_type: str
     processing_pattern: str = "raw"
+
+    list_array_path: str | None = None
+    parent_array_path: str | None = None
+    child_array_path: str | None = None
+    grandchild_array_path: str | None = None
+    file_link_array_path: str | None = None
+    file_link_field_name: str | None = None
 
     endpoint_url: str | None = None
     http_method: str | None = None
@@ -148,6 +157,10 @@ def validate_data_source_request(
 
     validate_processing_pattern(
         request.processing_pattern
+    )
+
+    validate_processing_settings(
+        request
     )
 
     validate_parameters(
@@ -272,6 +285,11 @@ def create_parent_data(
     data = create_common_data(
         request=request,
         method_key=common_method_key,
+    )
+
+    set_processing_settings_data(
+        data=data,
+        request=request,
     )
 
     if source_type in (
@@ -458,6 +476,42 @@ def serialize_data_source(
             data.get(
                 "processing_pattern",
                 "raw"
+            ),
+
+        "list_array_path":
+            data.get(
+                "list_array_path",
+                ""
+            ),
+
+        "parent_array_path":
+            data.get(
+                "parent_array_path",
+                ""
+            ),
+
+        "child_array_path":
+            data.get(
+                "child_array_path",
+                ""
+            ),
+
+        "grandchild_array_path":
+            data.get(
+                "grandchild_array_path",
+                ""
+            ),
+
+        "file_link_array_path":
+            data.get(
+                "file_link_array_path",
+                ""
+            ),
+
+        "file_link_field_name":
+            data.get(
+                "file_link_field_name",
+                ""
             ),
 
         "endpoint_url":

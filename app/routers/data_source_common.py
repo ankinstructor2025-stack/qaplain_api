@@ -44,6 +44,116 @@ def validate_processing_pattern(value: Any) -> str:
     return processing_pattern
 
 
+PROCESSING_SETTING_FIELDS = (
+    "list_array_path",
+    "parent_array_path",
+    "child_array_path",
+    "grandchild_array_path",
+    "file_link_array_path",
+    "file_link_field_name",
+)
+
+
+def validate_processing_settings(
+    request,
+) -> None:
+    processing_pattern = validate_processing_pattern(
+        getattr(request, "processing_pattern", "raw")
+    )
+
+    required_fields = {
+        "raw": (),
+        "json_list": (
+            (
+                "list_array_path",
+                "一覧配列を入力してください。",
+            ),
+        ),
+        "parent_child": (
+            (
+                "parent_array_path",
+                "親配列を入力してください。",
+            ),
+            (
+                "child_array_path",
+                "子配列を入力してください。",
+            ),
+        ),
+        "parent_child_grandchild": (
+            (
+                "parent_array_path",
+                "親配列を入力してください。",
+            ),
+            (
+                "child_array_path",
+                "子配列を入力してください。",
+            ),
+            (
+                "grandchild_array_path",
+                "孫配列を入力してください。",
+            ),
+        ),
+        "file_links": (
+            (
+                "file_link_array_path",
+                "一覧配列を入力してください。",
+            ),
+            (
+                "file_link_field_name",
+                "ファイルURL項目を入力してください。",
+            ),
+        ),
+    }
+
+    for field_name, message in required_fields[
+        processing_pattern
+    ]:
+        if not normalize_text(
+            getattr(request, field_name, "")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=message,
+            )
+
+
+def set_processing_settings_data(
+    data: dict,
+    request,
+) -> None:
+    processing_pattern = validate_processing_pattern(
+        getattr(request, "processing_pattern", "raw")
+    )
+
+    active_fields = {
+        "raw": (),
+        "json_list": (
+            "list_array_path",
+        ),
+        "parent_child": (
+            "parent_array_path",
+            "child_array_path",
+        ),
+        "parent_child_grandchild": (
+            "parent_array_path",
+            "child_array_path",
+            "grandchild_array_path",
+        ),
+        "file_links": (
+            "file_link_array_path",
+            "file_link_field_name",
+        ),
+    }[processing_pattern]
+
+    for field_name in PROCESSING_SETTING_FIELDS:
+        if field_name in active_fields:
+            data[field_name] = normalize_text(
+                getattr(request, field_name, "")
+            )
+        else:
+            data[field_name] = firestore.DELETE_FIELD
+
+
 def validate_tenant_id(
     tenant_id: Any,
 ) -> str:
