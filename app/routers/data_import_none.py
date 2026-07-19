@@ -172,22 +172,14 @@ def request_external_data(
     request = Request(
         requested_url,
         method="GET",
-        headers={
-            "User-Agent":
-                "Mozilla/5.0 "
-                "(compatible; QAPlain-Knowledge-Studio/1.0)",
-
-            "Accept":
-                (
-                    "application/json, "
-                    "application/xml, "
-                    "text/xml, "
-                    "text/csv, "
-                    "text/plain, "
-                    "application/pdf, "
-                    "application/zip, "
-                    "*/*;q=0.8"
-                ),
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/138.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "ja,en;q=0.9",
         },
     )
 
