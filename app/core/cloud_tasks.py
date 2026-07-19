@@ -37,6 +37,11 @@ CLOUD_TASKS_AUDIENCE = os.getenv(
 )
 
 DEFAULT_QUEUE_PREFIX = "data-import"
+DEFAULT_QUEUE_PREFIX = os.getenv(
+    "DATA_IMPORT_QUEUE_PREFIX",
+    "data-import",
+)
+
 MIN_TASK_CONCURRENCY = 1
 MAX_TASK_CONCURRENCY = 10
 
