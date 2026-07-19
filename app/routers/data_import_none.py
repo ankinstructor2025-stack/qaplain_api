@@ -191,6 +191,11 @@ def request_external_data(
         },
     )
 
+    print(
+        "external request URL: "
+        f"{requested_url}"
+    )
+
     try:
         with urlopen(
             request,
