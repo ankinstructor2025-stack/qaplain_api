@@ -147,12 +147,6 @@ def ensure_task_queue(
             "CLOUD_TASKS_PROJECTが設定されていません。"
         )
 
-    print(
-        f"Queue ID={queue_id}, "
-        f"prefix={prefix}, "
-        f"project={CLOUD_TASKS_PROJECT}"
-    )
-
     normalized_concurrency = (
         normalize_task_concurrency(concurrency)
     )
@@ -160,6 +154,13 @@ def ensure_task_queue(
         identifier=identifier,
         prefix=prefix,
     )
+
+    print(
+        f"Queue ID={queue_id}, "
+        f"prefix={prefix}, "
+        f"project={CLOUD_TASKS_PROJECT}"
+    )
+
     client = get_cloud_tasks_client()
     queue_full_name = client.queue_path(
         CLOUD_TASKS_PROJECT,
