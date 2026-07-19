@@ -147,6 +147,12 @@ def ensure_task_queue(
             "CLOUD_TASKS_PROJECTが設定されていません。"
         )
 
+    print(
+        f"Queue ID={queue_id}, "
+        f"prefix={prefix}, "
+        f"project={CLOUD_TASKS_PROJECT}"
+    )
+
     normalized_concurrency = (
         normalize_task_concurrency(concurrency)
     )
