@@ -3,7 +3,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 from fastapi import HTTPException
 from google.cloud import storage
@@ -218,6 +218,85 @@ def get_storage_bucket():
     return storage.Client().bucket(BUCKET_NAME)
 
 
+def get_display_metadata(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        return {
+            "display_name": "",
+            "title": "",
+            "description": "",
+        }
+
+    def first_text(*field_names: str) -> str:
+        for field_name in field_names:
+            value = payload.get(field_name)
+            if isinstance(value, (str, int, float)):
+                normalized = normalize_text(value)
+                if normalized:
+                    return normalized
+        return ""
+
+    title = first_text(
+        "title",
+        "name",
+        "label",
+        "subject",
+        "meetingName",
+        "nameOfMeeting",
+    )
+    description = first_text(
+        "description",
+        "notes",
+        "summary",
+        "caption",
+    )
+
+    return {
+        "display_name": title or description,
+        "title": title,
+        "description": description,
+    }
+
+
+def get_source_file_name(
+    source_url: str,
+    extension: str,
+    source_metadata: dict | None = None,
+) -> str:
+    source_path = unquote(urlparse(source_url).path)
+    url_file_name = source_path.rsplit("/", 1)[-1].strip()
+
+    if url_file_name and "." in url_file_name:
+        candidate = url_file_name
+    else:
+        metadata = source_metadata or {}
+        candidate = ""
+
+        for field_name in (
+            "file_name",
+            "filename",
+            "name",
+            "title",
+        ):
+            value = normalize_text(metadata.get(field_name, ""))
+            if value:
+                candidate = value
+                break
+
+    if not candidate:
+        candidate = f"source.{extension}"
+    elif "." not in candidate and extension:
+        candidate = f"{candidate}.{extension}"
+
+    candidate = candidate.replace("\\", "_").replace("/", "_")
+    candidate = "".join(
+        character
+        for character in candidate
+        if ord(character) >= 32 and character not in {"\x7f"}
+    ).strip(" .")
+
+    return candidate or f"source.{extension}"
+
+
 def delete_from_storage(gcs_path: str) -> None:
     if not gcs_path:
         return
@@ -319,6 +398,7 @@ def save_json_item(
     _save_bytes_to_storage(content, "application/json", gcs_path)
 
     now = now_iso()
+    display_metadata = get_display_metadata(payload)
     data = {
         "item_id": item_id,
         "batch_id": batch_id,
@@ -331,6 +411,7 @@ def save_json_item(
         "item_type": item_type,
         "level": level,
         "source_index": source_index,
+        **display_metadata,
         "content_type": "application/json",
         "extension": "json",
         "size_bytes": len(content),
@@ -366,12 +447,20 @@ def save_downloaded_file(
     task_id: str,
     parent_id: str | None,
     source_index: int | None = None,
+    source_metadata: dict | None = None,
 ) -> dict:
     item_id = uuid.uuid4().hex
     extension = get_content_extension(content_type, source_url, data_source)
+    metadata = source_metadata if isinstance(source_metadata, dict) else {}
+    display_metadata = get_display_metadata(metadata)
+    file_name = get_source_file_name(
+        source_url=source_url,
+        extension=extension,
+        source_metadata=metadata,
+    )
     gcs_path = (
         f"data-sources/{data_source['data_source_id']}/"
-        f"imports/{batch_id}/files/{item_id}/source.{extension}"
+        f"imports/{batch_id}/files/{item_id}/{file_name}"
     )
     _save_bytes_to_storage(content, content_type, gcs_path)
 
@@ -389,6 +478,11 @@ def save_downloaded_file(
         "level": 1,
         "source_index": source_index,
         "source_url": source_url,
+        "file_name": file_name,
+        "display_name": display_metadata["display_name"] or file_name,
+        "title": display_metadata["title"],
+        "description": display_metadata["description"],
+        "source_metadata": metadata,
         "content_type": content_type,
         "extension": extension,
         "size_bytes": len(content),

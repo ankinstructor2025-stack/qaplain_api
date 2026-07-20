@@ -12,9 +12,11 @@ from app.core.cloud_tasks import (
 )
 from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
+    DATA_IMPORT_COLLECTION,
     DATA_IMPORT_TASK_COLLECTION,
     TENANT_COLLECTION,
     build_requested_url,
+    get_storage_bucket,
     normalize_content_type,
     normalize_key,
     normalize_text,
@@ -375,7 +377,105 @@ def submit_task(queue_config: dict, task_data: dict) -> None:
     )
 
 
+ACTIVE_TASK_STATUSES = {"queued", "running"}
+
+
+def get_active_import_tasks(data_source_id: str) -> list[dict]:
+    documents = (
+        get_firestore_client()
+        .collection(DATA_IMPORT_TASK_COLLECTION)
+        .where("data_source_id", "==", data_source_id)
+        .stream()
+    )
+
+    return [
+        {**(document.to_dict() or {}), "task_id": document.id}
+        for document in documents
+        if normalize_key((document.to_dict() or {}).get("status", ""))
+        in ACTIVE_TASK_STATUSES
+    ]
+
+
+def delete_documents_by_data_source(
+    collection_name: str,
+    data_source_id: str,
+) -> int:
+    documents = list(
+        get_firestore_client()
+        .collection(collection_name)
+        .where("data_source_id", "==", data_source_id)
+        .stream()
+    )
+
+    deleted_count = 0
+    for offset in range(0, len(documents), 400):
+        batch = get_firestore_client().batch()
+        chunk = documents[offset:offset + 400]
+
+        for document in chunk:
+            batch.delete(document.reference)
+
+        if chunk:
+            batch.commit()
+            deleted_count += len(chunk)
+
+    return deleted_count
+
+
+def delete_storage_by_data_source(data_source_id: str) -> int:
+    prefix = f"data-sources/{data_source_id}/imports/"
+    deleted_count = 0
+
+    try:
+        for blob in get_storage_bucket().list_blobs(prefix=prefix):
+            blob.delete()
+            deleted_count += 1
+    except Exception as error:
+        print(
+            "Cloud Storage cleanup error: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="既存の取得ファイルを削除できませんでした。",
+        )
+
+    return deleted_count
+
+
+def reset_import_data(data_source: dict) -> dict:
+    data_source_id = data_source["data_source_id"]
+    active_tasks = get_active_import_tasks(data_source_id)
+
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IMPORT_IN_PROGRESS",
+                "message": "処理中の取込タスクがあるため再取込できません。",
+                "active_task_count": len(active_tasks),
+            },
+        )
+
+    deleted_storage_count = delete_storage_by_data_source(data_source_id)
+    deleted_item_count = delete_documents_by_data_source(
+        DATA_IMPORT_COLLECTION,
+        data_source_id,
+    )
+    deleted_task_count = delete_documents_by_data_source(
+        DATA_IMPORT_TASK_COLLECTION,
+        data_source_id,
+    )
+
+    return {
+        "deleted_storage_count": deleted_storage_count,
+        "deleted_item_count": deleted_item_count,
+        "deleted_task_count": deleted_task_count,
+    }
+
+
 def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
+    reset_result = reset_import_data(data_source)
     queue_config = get_tenant_task_queue_config(data_source)
     batch_id = uuid.uuid4().hex
     task_data = create_import_task_document(
@@ -405,6 +505,7 @@ def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
         "queue_id": queue_config["queue_id"],
         "task_concurrency": queue_config["task_concurrency"],
         "status": "queued",
+        "reset_result": reset_result,
     }
 
 
@@ -582,6 +683,7 @@ def expand_file_links(
                 "url": normalize_text(url),
                 "source_index": index,
                 "parent_id": None,
+                "source_metadata": item if isinstance(item, dict) else {},
             },
         )
         created += 1
@@ -704,6 +806,11 @@ def execute_download_file_task(*, data_source: dict, user: dict, task_data: dict
         task_id=task_data["task_id"],
         parent_id=normalize_text(payload.get("parent_id")) or None,
         source_index=payload.get("source_index"),
+        source_metadata=(
+            payload.get("source_metadata")
+            if isinstance(payload.get("source_metadata"), dict)
+            else {}
+        ),
     )
     return {"item_id": item["item_id"], "result_item_count": 1}
 
