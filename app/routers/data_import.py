@@ -18,18 +18,21 @@ from app.routers.data_import_common import (
     DATA_IMPORT_TASK_COLLECTION,
     UPLOADED_FILE_COLLECTION,
     authenticate_user,
-    enqueue_import_task,
     get_data_source,
-    get_import_task,
     normalize_key,
     normalize_text,
     now_iso,
     serialize_datetime,
     serialize_value,
-    update_import_task,
 )
 from app.routers.data_import_file_upload import (
     execute_file_upload,
+)
+from app.routers.data_import_executor import (
+    enqueue_import_task,
+    execute_import,
+    get_import_task,
+    update_import_task,
 )
 
 
@@ -162,57 +165,6 @@ def serialize_import(
 
     return serialize_value(
         data
-    )
-
-
-def execute_import_by_method(
-    *,
-    data_source: dict,
-    user: dict,
-) -> dict:
-    method_key = normalize_key(
-        data_source.get(
-            "authentication_method_key",
-            "",
-        )
-    )
-
-    if method_key == "none":
-        from app.routers.data_import_none import (
-            execute_none_import,
-        )
-
-        return execute_none_import(
-            data_source=data_source,
-            user=user,
-        )
-
-    if method_key == "basic":
-        from app.routers.data_import_basic import (
-            execute_basic_import,
-        )
-
-        return execute_basic_import(
-            data_source=data_source,
-            user=user,
-        )
-
-    if method_key == "client_credentials":
-        from app.routers.data_import_client_credentials import (
-            execute_client_credentials_import,
-        )
-
-        return execute_client_credentials_import(
-            data_source=data_source,
-            user=user,
-        )
-
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "未対応の認証方式です。"
-            f" method={method_key}"
-        ),
     )
 
 
@@ -377,7 +329,7 @@ def execute_import_worker(
                 "data_source_id"
             ]
         )
-        result = execute_import_by_method(
+        result = execute_import(
             data_source=data_source,
             user={
                 "email": task_data.get(

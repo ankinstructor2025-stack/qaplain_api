@@ -1,31 +1,19 @@
-import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any
 
 from fastapi import HTTPException, UploadFile
 from firebase_admin import firestore
-from google.cloud import storage
-
 from app.core.firebase import get_firestore_client
-
-
-BUCKET_NAME = os.getenv(
-    "UPLOAD_BUCKET",
-    "qaplain",
+from app.routers.data_import_common import (
+    BUCKET_NAME,
+    UPLOADED_FILE_COLLECTION,
+    get_storage_bucket,
+    normalize_extension,
+    normalize_text,
 )
 
 FILE_TYPE_COLLECTION = "file_types"
-UPLOADED_FILE_COLLECTION = "uploaded_files"
-
-
-def normalize_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def normalize_extension(value: Any) -> str:
-    return normalize_text(value).lower().lstrip(".")
 
 
 def get_file_extension(file_name: str) -> str:
@@ -131,10 +119,6 @@ def validate_file_extension(file_name: str) -> str:
         )
 
     return extension
-
-
-def get_storage_bucket():
-    return storage.Client().bucket(BUCKET_NAME)
 
 
 def build_gcs_path(
