@@ -114,7 +114,11 @@ def get_data_source(data_source_id: str) -> dict:
     if not normalized_id:
         raise HTTPException(status_code=400, detail="データソースIDが指定されていません。")
 
-    reference = get_firestore_client().collection(DATA_SOURCE_COLLECTION).document(normalized_id)
+    reference = (
+        get_firestore_client()
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(normalized_id)
+    )
     document = reference.get()
     if not document.exists:
         raise HTTPException(status_code=404, detail="データソースが見つかりません。")
@@ -124,7 +128,14 @@ def get_data_source(data_source_id: str) -> dict:
         "data_source_id": document.id,
         "data_source_name": data.get("data_source_name", ""),
         "tenant_id": normalize_text(data.get("tenant_id", "")),
-        "source_type": data.get("source_type", ""),
+        "source_type": normalize_key(data.get("source_type", "")),
+        "processing_pattern": normalize_key(data.get("processing_pattern", "raw")) or "raw",
+        "list_array_path": normalize_text(data.get("list_array_path", "")),
+        "parent_array_path": normalize_text(data.get("parent_array_path", "")),
+        "child_array_path": normalize_text(data.get("child_array_path", "")),
+        "grandchild_array_path": normalize_text(data.get("grandchild_array_path", "")),
+        "file_link_array_path": normalize_text(data.get("file_link_array_path", "")),
+        "file_link_field_name": normalize_text(data.get("file_link_field_name", "")),
         "authentication_method_key": normalize_key(data.get("authentication_method_key", "")),
         "endpoint_url": normalize_text(data.get("endpoint_url", "")),
         "http_method": normalize_text(data.get("http_method", "GET")).upper(),
@@ -200,65 +211,7 @@ def get_content_extension(content_type: str, source_url: str, data_source: dict)
         suffix = normalize_extension(source_path.rsplit(".", 1)[-1])
         if suffix:
             return suffix
-
-    for parameter in data_source.get("parameters", []):
-        if normalize_key(parameter.get("parameter_name", "")) == "type":
-            requested_type = normalize_extension(parameter.get("parameter_value", ""))
-            if requested_type:
-                return requested_type
     return "bin"
-
-
-def build_import_preview(content: bytes, content_type: str, max_characters: int = 20000) -> dict:
-    text_types = {
-        "application/json", "application/xml", "text/xml",
-        "text/csv", "text/plain", "text/html",
-    }
-    if content_type not in text_types:
-        return {"preview_available": False, "preview_format": "", "preview_text": ""}
-
-    decoded_text = content.decode("utf-8", errors="replace")
-    preview_format = "text"
-    if content_type == "application/json":
-        preview_format = "json"
-        try:
-            decoded_text = json.dumps(json.loads(decoded_text), ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-    elif content_type in {"application/xml", "text/xml"}:
-        preview_format = "xml"
-    elif content_type == "text/html":
-        preview_format = "html"
-    elif content_type == "text/csv":
-        preview_format = "csv"
-
-    truncated = len(decoded_text) > max_characters
-    preview_text = decoded_text[:max_characters]
-    if truncated:
-        preview_text += "\n\n※ 表示上限を超えたため、先頭部分のみ表示しています。"
-    return {
-        "preview_available": True,
-        "preview_format": preview_format,
-        "preview_text": preview_text,
-    }
-
-
-def count_json_documents(content: bytes, content_type: str) -> int | None:
-    if content_type != "application/json":
-        return None
-    try:
-        data = json.loads(content.decode("utf-8"))
-    except Exception:
-        return None
-    if isinstance(data, list):
-        return len(data)
-    if isinstance(data, dict):
-        for key in ("items", "results", "records", "documents", "data"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return len(value)
-        return 1
-    return None
 
 
 def get_storage_bucket():
@@ -276,55 +229,58 @@ def delete_from_storage(gcs_path: str) -> None:
         print(f"Cloud Storage delete error: {type(error).__name__}: {error}")
 
 
-def save_import_file(
+def _save_bytes_to_storage(content: bytes, content_type: str, gcs_path: str) -> None:
+    try:
+        get_storage_bucket().blob(gcs_path).upload_from_string(
+            content,
+            content_type=content_type,
+        )
+    except Exception as error:
+        print(f"Cloud Storage upload error: {type(error).__name__}: {error}")
+        raise HTTPException(status_code=500, detail="Cloud Storageへの保存に失敗しました。")
+
+
+def save_raw_response(
     *,
     content: bytes,
     content_type: str,
     data_source: dict,
-    import_method: str,
     user: dict,
     source_url: str,
     http_status: int,
+    batch_id: str,
+    task_id: str,
 ) -> dict:
     item_id = uuid.uuid4().hex
     extension = get_content_extension(content_type, source_url, data_source)
     gcs_path = (
         f"data-sources/{data_source['data_source_id']}/"
-        f"api-imports/{item_id}/source.{extension}"
+        f"imports/{batch_id}/raw/{item_id}/source.{extension}"
     )
-    preview = build_import_preview(content, content_type)
-    document_count = count_json_documents(content, content_type)
-
-    try:
-        get_storage_bucket().blob(gcs_path).upload_from_string(content, content_type=content_type)
-    except Exception as error:
-        print(f"Cloud Storage upload error: {type(error).__name__}: {error}")
-        raise HTTPException(status_code=500, detail="Cloud Storageへの保存に失敗しました。")
+    _save_bytes_to_storage(content, content_type, gcs_path)
 
     now = now_iso()
     data = {
         "item_id": item_id,
+        "batch_id": batch_id,
+        "task_id": task_id,
         "data_source_id": data_source["data_source_id"],
         "data_source_name": data_source.get("data_source_name", ""),
         "tenant_id": data_source.get("tenant_id", ""),
+        "processing_pattern": data_source.get("processing_pattern", "raw"),
         "parent_id": None,
         "item_type": "raw_response",
+        "level": 0,
         "title": data_source.get("data_source_name", ""),
-        "description": "",
-        "import_method": import_method,
-        "requested_url": source_url,
-        "http_method": data_source.get("http_method", "GET"),
+        "source_url": source_url,
         "http_status": http_status,
         "content_type": content_type,
         "extension": extension,
         "size_bytes": len(content),
-        "document_count": document_count,
         "bucket_name": BUCKET_NAME,
         "gcs_path": gcs_path,
         "gcs_uri": f"gs://{BUCKET_NAME}/{gcs_path}",
-        **preview,
         "status": "downloaded",
-        "parameters": data_source.get("parameters", []),
         "created_at": now,
         "created_by": user.get("email", ""),
         "updated_at": now,
@@ -338,4 +294,123 @@ def save_import_file(
         print(f"Firestore registration error: {type(error).__name__}: {error}")
         raise HTTPException(status_code=500, detail="取込管理情報の登録に失敗しました。")
 
-    return {"message": "外部データを取り込みました。", **data}
+    return data
+
+
+def save_json_item(
+    *,
+    payload: Any,
+    data_source: dict,
+    user: dict,
+    batch_id: str,
+    task_id: str,
+    item_type: str,
+    level: int,
+    parent_id: str | None,
+    source_index: int | None = None,
+    item_id: str | None = None,
+) -> dict:
+    item_id = normalize_text(item_id) or uuid.uuid4().hex
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    gcs_path = (
+        f"data-sources/{data_source['data_source_id']}/"
+        f"imports/{batch_id}/items/{item_id}/data.json"
+    )
+    _save_bytes_to_storage(content, "application/json", gcs_path)
+
+    now = now_iso()
+    data = {
+        "item_id": item_id,
+        "batch_id": batch_id,
+        "task_id": task_id,
+        "data_source_id": data_source["data_source_id"],
+        "data_source_name": data_source.get("data_source_name", ""),
+        "tenant_id": data_source.get("tenant_id", ""),
+        "processing_pattern": data_source.get("processing_pattern", "raw"),
+        "parent_id": parent_id,
+        "item_type": item_type,
+        "level": level,
+        "source_index": source_index,
+        "content_type": "application/json",
+        "extension": "json",
+        "size_bytes": len(content),
+        "bucket_name": BUCKET_NAME,
+        "gcs_path": gcs_path,
+        "gcs_uri": f"gs://{BUCKET_NAME}/{gcs_path}",
+        "status": "imported",
+        "data": payload,
+        "created_at": now,
+        "created_by": user.get("email", ""),
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
+    }
+
+    try:
+        get_firestore_client().collection(DATA_IMPORT_COLLECTION).document(item_id).set(data)
+    except Exception as error:
+        delete_from_storage(gcs_path)
+        print(f"Firestore registration error: {type(error).__name__}: {error}")
+        raise HTTPException(status_code=500, detail="取込データの登録に失敗しました。")
+
+    return data
+
+
+def save_downloaded_file(
+    *,
+    content: bytes,
+    content_type: str,
+    source_url: str,
+    data_source: dict,
+    user: dict,
+    batch_id: str,
+    task_id: str,
+    parent_id: str | None,
+    source_index: int | None = None,
+) -> dict:
+    item_id = uuid.uuid4().hex
+    extension = get_content_extension(content_type, source_url, data_source)
+    gcs_path = (
+        f"data-sources/{data_source['data_source_id']}/"
+        f"imports/{batch_id}/files/{item_id}/source.{extension}"
+    )
+    _save_bytes_to_storage(content, content_type, gcs_path)
+
+    now = now_iso()
+    data = {
+        "item_id": item_id,
+        "batch_id": batch_id,
+        "task_id": task_id,
+        "data_source_id": data_source["data_source_id"],
+        "data_source_name": data_source.get("data_source_name", ""),
+        "tenant_id": data_source.get("tenant_id", ""),
+        "processing_pattern": data_source.get("processing_pattern", "raw"),
+        "parent_id": parent_id,
+        "item_type": "file",
+        "level": 1,
+        "source_index": source_index,
+        "source_url": source_url,
+        "content_type": content_type,
+        "extension": extension,
+        "size_bytes": len(content),
+        "bucket_name": BUCKET_NAME,
+        "gcs_path": gcs_path,
+        "gcs_uri": f"gs://{BUCKET_NAME}/{gcs_path}",
+        "status": "downloaded",
+        "created_at": now,
+        "created_by": user.get("email", ""),
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
+    }
+
+    try:
+        get_firestore_client().collection(DATA_IMPORT_COLLECTION).document(item_id).set(data)
+    except Exception as error:
+        delete_from_storage(gcs_path)
+        print(f"Firestore registration error: {type(error).__name__}: {error}")
+        raise HTTPException(status_code=500, detail="取得ファイル情報の登録に失敗しました。")
+
+    return data
+
+
+# 既存呼び出しとの互換用
+save_import_file = save_raw_response

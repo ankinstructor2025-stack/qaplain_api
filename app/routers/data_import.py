@@ -331,6 +331,7 @@ def execute_import_worker(
         )
         result = execute_import(
             data_source=data_source,
+            task_data=task_data,
             user={
                 "email": task_data.get(
                     "requested_by",
@@ -435,6 +436,9 @@ def get_tasks(
     data_source_id: str | None = Query(
         None
     ),
+    batch_id: str | None = Query(
+        None
+    ),
     authorization: str = Header(...),
 ):
     user = authenticate_user(
@@ -461,6 +465,15 @@ def get_tasks(
             ),
         )
 
+    if batch_id:
+        query = query.where(
+            "batch_id",
+            "==",
+            normalize_text(
+                batch_id
+            ),
+        )
+
     tasks = [
         serialize_value({
             **(document.to_dict() or {}),
@@ -479,9 +492,71 @@ def get_tasks(
         reverse=True,
     )
 
+    status_counts = {
+        "queued": 0,
+        "running": 0,
+        "completed": 0,
+        "failed": 0,
+        "enqueue_failed": 0,
+        "other": 0,
+    }
+
+    for task in tasks:
+        status = normalize_key(
+            task.get(
+                "status",
+                "",
+            )
+        )
+
+        if status in status_counts:
+            status_counts[status] += 1
+        else:
+            status_counts["other"] += 1
+
+    total_count = len(tasks)
+    active_count = (
+        status_counts["queued"]
+        + status_counts["running"]
+    )
+    failed_count = (
+        status_counts["failed"]
+        + status_counts["enqueue_failed"]
+    )
+    finished_count = (
+        status_counts["completed"]
+        + failed_count
+    )
+    progress_percent = (
+        round(
+            finished_count
+            / total_count
+            * 100,
+            1,
+        )
+        if total_count
+        else 0.0
+    )
+
     return {
+        "data_source_id": normalize_text(
+            data_source_id
+        ),
+        "batch_id": normalize_text(
+            batch_id
+        ),
+        "total_count": total_count,
+        "completed_count": status_counts["completed"],
+        "running_count": status_counts["running"],
+        "queued_count": status_counts["queued"],
+        "failed_count": failed_count,
+        "finished_count": finished_count,
+        "active_count": active_count,
+        "active": active_count > 0,
+        "progress_percent": progress_percent,
+        "status_counts": status_counts,
         "tasks": tasks,
-        "count": len(tasks),
+        "count": total_count,
     }
 
 

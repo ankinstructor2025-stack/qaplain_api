@@ -1,9 +1,15 @@
+import json
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 
-from app.core.cloud_tasks import create_http_task, ensure_task_queue, normalize_task_concurrency
+from app.core.cloud_tasks import (
+    create_http_task,
+    ensure_task_queue,
+    normalize_task_concurrency,
+)
 from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
     DATA_IMPORT_TASK_COLLECTION,
@@ -13,7 +19,9 @@ from app.routers.data_import_common import (
     normalize_key,
     normalize_text,
     now_iso,
-    save_import_file,
+    save_downloaded_file,
+    save_json_item,
+    save_raw_response,
 )
 
 
@@ -27,7 +35,10 @@ def build_auth_headers(data_source: dict) -> dict[str, str]:
     elif method_key == "client_credentials":
         from app.routers.data_import_client_credentials import build_auth_headers as builder
     else:
-        raise HTTPException(status_code=400, detail=f"未対応の認証方式です。 method={method_key}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"未対応の認証方式です。 method={method_key}",
+        )
 
     return builder(data_source)
 
@@ -48,15 +59,19 @@ def request_external_data(data_source: dict) -> tuple[bytes, int, str, str]:
         with urlopen(request, timeout=60) as response:
             content = response.read()
             http_status = int(response.status)
-            content_type = normalize_content_type(response.headers.get("Content-Type"))
+            content_type = normalize_content_type(
+                response.headers.get("Content-Type")
+            )
     except HTTPError as error:
-        external_detail = error.read().decode("utf-8", errors="replace")[:1000]
         raise HTTPException(
             status_code=502,
             detail={
                 "message": "接続先APIからエラーが返されました。",
                 "external_status": error.code,
-                "external_detail": external_detail,
+                "external_detail": error.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )[:1000],
             },
         )
     except URLError as error:
@@ -74,7 +89,11 @@ def request_external_data(data_source: dict) -> tuple[bytes, int, str, str]:
         raise HTTPException(status_code=502, detail="外部データの取得に失敗しました。")
 
     if http_status < 200 or http_status >= 300:
-        raise HTTPException(status_code=502, detail="接続先APIから正常でない応答が返されました。")
+        raise HTTPException(
+            status_code=502,
+            detail="接続先APIから正常でない応答が返されました。",
+        )
+
     if content_type == "text/html":
         raise HTTPException(
             status_code=502,
@@ -84,54 +103,155 @@ def request_external_data(data_source: dict) -> tuple[bytes, int, str, str]:
     return content, http_status, content_type, requested_url
 
 
-def execute_import(*, data_source: dict, user: dict) -> dict:
-    content, http_status, content_type, requested_url = request_external_data(data_source)
-    return save_import_file(
-        content=content,
-        content_type=content_type,
-        data_source=data_source,
-        import_method=normalize_key(data_source.get("authentication_method_key", "")),
-        user=user,
-        source_url=requested_url,
-        http_status=http_status,
+def request_file(url: str, data_source: dict) -> tuple[bytes, int, str]:
+    request = Request(
+        url,
+        method="GET",
+        headers={
+            "User-Agent": "QAPlain-Knowledge-Studio/1.0",
+            "Accept": "*/*",
+            **build_auth_headers(data_source),
+        },
     )
+
+    try:
+        with urlopen(request, timeout=120) as response:
+            return (
+                response.read(),
+                int(response.status),
+                normalize_content_type(response.headers.get("Content-Type")),
+            )
+    except HTTPError as error:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "ファイル取得先からエラーが返されました。",
+                "external_status": error.code,
+                "external_detail": error.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )[:1000],
+            },
+        )
+    except URLError as error:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "ファイル取得先へ接続できませんでした。",
+                "external_detail": str(error.reason),
+            },
+        )
+
+
+def get_path_value(data, path: str):
+    current = data
+    normalized_path = normalize_text(path)
+    if not normalized_path:
+        return current
+
+    for part in normalized_path.split("."):
+        part = part.strip()
+        if not part:
+            continue
+
+        if isinstance(current, dict):
+            if part not in current:
+                return None
+            current = current[part]
+            continue
+
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if index < 0 or index >= len(current):
+                return None
+            current = current[index]
+            continue
+
+        return None
+
+    return current
+
+
+def get_required_list(data, path: str, label: str) -> list:
+    value = get_path_value(data, path)
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label}（{path}）を配列として取得できませんでした。",
+        )
+    return value
 
 
 def get_tenant_task_queue_config(data_source: dict) -> dict:
     tenant_id = normalize_text(data_source.get("tenant_id", ""))
     if not tenant_id:
-        raise HTTPException(status_code=400, detail="データソースにテナントIDが設定されていません。")
+        raise HTTPException(
+            status_code=400,
+            detail="データソースにテナントIDが設定されていません。",
+        )
 
-    tenant_document = get_firestore_client().collection(TENANT_COLLECTION).document(tenant_id).get()
+    tenant_document = (
+        get_firestore_client()
+        .collection(TENANT_COLLECTION)
+        .document(tenant_id)
+        .get()
+    )
     if not tenant_document.exists:
         raise HTTPException(status_code=404, detail="テナントが見つかりません。")
 
     tenant_data = tenant_document.to_dict() or {}
-    task_concurrency = normalize_task_concurrency(tenant_data.get("task_concurrency", 1))
+    task_concurrency = normalize_task_concurrency(
+        tenant_data.get("task_concurrency", 1)
+    )
+
     try:
-        queue_config = ensure_task_queue(identifier=tenant_id, concurrency=task_concurrency)
+        queue_config = ensure_task_queue(
+            identifier=tenant_id,
+            concurrency=task_concurrency,
+        )
     except Exception as error:
         print(f"Cloud Tasks queue setup error: {type(error).__name__}: {error}")
-        raise HTTPException(status_code=500, detail="テナント用Cloud Tasksキューを準備できませんでした。")
+        raise HTTPException(
+            status_code=500,
+            detail="テナント用Cloud Tasksキューを準備できませんでした。",
+        )
 
     return {"tenant_id": tenant_id, **queue_config}
 
 
-def create_import_task_document(*, data_source: dict, user: dict, queue_id: str, task_concurrency: int) -> dict:
-    import uuid
-
+def create_import_task_document(
+    *,
+    data_source: dict,
+    user: dict,
+    queue_id: str,
+    task_concurrency: int,
+    batch_id: str,
+    task_type: str,
+    payload: dict | None = None,
+    parent_task_id: str | None = None,
+) -> dict:
     task_id = uuid.uuid4().hex
     now = now_iso()
     data = {
         "task_id": task_id,
+        "batch_id": batch_id,
+        "task_type": task_type,
+        "parent_task_id": parent_task_id,
+        "payload": payload or {},
         "data_source_id": data_source["data_source_id"],
         "data_source_name": data_source.get("data_source_name", ""),
         "tenant_id": data_source.get("tenant_id", ""),
-        "authentication_method_key": normalize_key(data_source.get("authentication_method_key", "")),
+        "authentication_method_key": normalize_key(
+            data_source.get("authentication_method_key", "")
+        ),
+        "processing_pattern": normalize_key(
+            data_source.get("processing_pattern", "raw")
+        ) or "raw",
         "queue_id": queue_id,
         "task_concurrency": task_concurrency,
         "status": "queued",
         "result_item_id": None,
+        "result_item_count": 0,
         "error_message": None,
         "requested_by": user.get("email", ""),
         "created_at": now,
@@ -139,31 +259,38 @@ def create_import_task_document(*, data_source: dict, user: dict, queue_id: str,
         "completed_at": None,
         "updated_at": now,
     }
-    get_firestore_client().collection(DATA_IMPORT_TASK_COLLECTION).document(task_id).set(data)
+    (
+        get_firestore_client()
+        .collection(DATA_IMPORT_TASK_COLLECTION)
+        .document(task_id)
+        .set(data)
+    )
     return data
 
 
 def update_import_task(task_id: str, **values) -> None:
     values["updated_at"] = now_iso()
-    get_firestore_client().collection(DATA_IMPORT_TASK_COLLECTION).document(task_id).set(values, merge=True)
+    (
+        get_firestore_client()
+        .collection(DATA_IMPORT_TASK_COLLECTION)
+        .document(task_id)
+        .set(values, merge=True)
+    )
 
 
 def get_import_task(task_id: str) -> dict:
-    document = get_firestore_client().collection(DATA_IMPORT_TASK_COLLECTION).document(task_id).get()
+    document = (
+        get_firestore_client()
+        .collection(DATA_IMPORT_TASK_COLLECTION)
+        .document(task_id)
+        .get()
+    )
     if not document.exists:
         raise HTTPException(status_code=404, detail="取込タスクが見つかりません。")
     return {**(document.to_dict() or {}), "task_id": document.id}
 
 
-def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
-    queue_config = get_tenant_task_queue_config(data_source)
-    task_data = create_import_task_document(
-        data_source=data_source,
-        user=user,
-        queue_id=queue_config["queue_id"],
-        task_concurrency=queue_config["task_concurrency"],
-    )
-
+def submit_task(queue_config: dict, task_data: dict) -> None:
     try:
         response = create_http_task(
             queue_full_name=queue_config["queue_full_name"],
@@ -176,20 +303,371 @@ def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
             error_message=str(error),
             completed_at=now_iso(),
         )
-        print(f"Cloud Tasks enqueue error: {type(error).__name__}: {error}")
-        raise HTTPException(status_code=500, detail="データ取得タスクを登録できませんでした。")
+        raise
 
     update_import_task(
         task_data["task_id"],
         cloud_task_name=response.name,
         queue_full_name=queue_config["queue_full_name"],
     )
+
+
+def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
+    queue_config = get_tenant_task_queue_config(data_source)
+    batch_id = uuid.uuid4().hex
+    task_data = create_import_task_document(
+        data_source=data_source,
+        user=user,
+        queue_id=queue_config["queue_id"],
+        task_concurrency=queue_config["task_concurrency"],
+        batch_id=batch_id,
+        task_type="fetch_root",
+    )
+
+    try:
+        submit_task(queue_config, task_data)
+    except Exception as error:
+        print(f"Cloud Tasks enqueue error: {type(error).__name__}: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail="データ取得タスクを登録できませんでした。",
+        )
+
     return {
         "message": "データ取得を受け付けました。",
         "task_id": task_data["task_id"],
+        "batch_id": batch_id,
         "data_source_id": data_source["data_source_id"],
         "tenant_id": queue_config["tenant_id"],
         "queue_id": queue_config["queue_id"],
         "task_concurrency": queue_config["task_concurrency"],
         "status": "queued",
     }
+
+
+def create_child_task(
+    *,
+    queue_config: dict,
+    data_source: dict,
+    user: dict,
+    batch_id: str,
+    parent_task_id: str,
+    task_type: str,
+    payload: dict,
+) -> dict:
+    task_data = create_import_task_document(
+        data_source=data_source,
+        user=user,
+        queue_id=queue_config["queue_id"],
+        task_concurrency=queue_config["task_concurrency"],
+        batch_id=batch_id,
+        task_type=task_type,
+        payload=payload,
+        parent_task_id=parent_task_id,
+    )
+    submit_task(queue_config, task_data)
+    return task_data
+
+
+def expand_json_list(
+    *,
+    root_json: dict | list,
+    data_source: dict,
+    root_task: dict,
+    user: dict,
+) -> int:
+    items = get_required_list(
+        root_json,
+        data_source.get("list_array_path", ""),
+        "一覧配列",
+    )
+    queue_config = get_tenant_task_queue_config(data_source)
+
+    created = 0
+    for index, item in enumerate(items):
+        create_child_task(
+            queue_config=queue_config,
+            data_source=data_source,
+            user=user,
+            batch_id=root_task["batch_id"],
+            parent_task_id=root_task["task_id"],
+            task_type="save_json_item",
+            payload={
+                "data": item,
+                "item_type": "list_item",
+                "level": 1,
+                "parent_id": None,
+                "source_index": index,
+            },
+        )
+        created += 1
+    return created
+
+
+def expand_parent_child(
+    *,
+    root_json: dict | list,
+    data_source: dict,
+    root_task: dict,
+    user: dict,
+    include_grandchildren: bool,
+) -> int:
+    parents = get_required_list(
+        root_json,
+        data_source.get("parent_array_path", ""),
+        "親配列",
+    )
+    child_path = data_source.get("child_array_path", "")
+    grandchild_path = data_source.get("grandchild_array_path", "")
+    queue_config = get_tenant_task_queue_config(data_source)
+
+    created = 0
+    for parent_index, parent in enumerate(parents):
+        parent_group_id = uuid.uuid4().hex
+        create_child_task(
+            queue_config=queue_config,
+            data_source=data_source,
+            user=user,
+            batch_id=root_task["batch_id"],
+            parent_task_id=root_task["task_id"],
+            task_type="save_json_item",
+            payload={
+                "data": parent,
+                "item_type": "parent",
+                "level": 1,
+                "parent_id": None,
+                "fixed_item_id": parent_group_id,
+                "source_index": parent_index,
+            },
+        )
+        created += 1
+
+        children = get_required_list(parent, child_path, "子配列")
+        for child_index, child in enumerate(children):
+            child_group_id = uuid.uuid4().hex
+            create_child_task(
+                queue_config=queue_config,
+                data_source=data_source,
+                user=user,
+                batch_id=root_task["batch_id"],
+                parent_task_id=root_task["task_id"],
+                task_type="save_json_item",
+                payload={
+                    "data": child,
+                    "item_type": "child",
+                    "level": 2,
+                    "parent_id": parent_group_id,
+                    "fixed_item_id": child_group_id,
+                    "source_index": child_index,
+                },
+            )
+            created += 1
+
+            if not include_grandchildren:
+                continue
+
+            grandchildren = get_required_list(child, grandchild_path, "孫配列")
+            for grandchild_index, grandchild in enumerate(grandchildren):
+                create_child_task(
+                    queue_config=queue_config,
+                    data_source=data_source,
+                    user=user,
+                    batch_id=root_task["batch_id"],
+                    parent_task_id=root_task["task_id"],
+                    task_type="save_json_item",
+                    payload={
+                        "data": grandchild,
+                        "item_type": "grandchild",
+                        "level": 3,
+                        "parent_id": child_group_id,
+                        "source_index": grandchild_index,
+                    },
+                )
+                created += 1
+
+    return created
+
+
+def expand_file_links(
+    *,
+    root_json: dict | list,
+    data_source: dict,
+    root_task: dict,
+    user: dict,
+) -> int:
+    items = get_required_list(
+        root_json,
+        data_source.get("file_link_array_path", ""),
+        "一覧配列",
+    )
+    link_field = data_source.get("file_link_field_name", "")
+    queue_config = get_tenant_task_queue_config(data_source)
+
+    created = 0
+    for index, item in enumerate(items):
+        url = get_path_value(item, link_field)
+        if not normalize_text(url):
+            continue
+        create_child_task(
+            queue_config=queue_config,
+            data_source=data_source,
+            user=user,
+            batch_id=root_task["batch_id"],
+            parent_task_id=root_task["task_id"],
+            task_type="download_file",
+            payload={
+                "url": normalize_text(url),
+                "source_index": index,
+                "parent_id": None,
+            },
+        )
+        created += 1
+    return created
+
+
+def execute_root_task(*, data_source: dict, user: dict, task_data: dict) -> dict:
+    content, http_status, content_type, requested_url = request_external_data(data_source)
+    pattern = normalize_key(data_source.get("processing_pattern", "raw")) or "raw"
+
+    raw_item = save_raw_response(
+        content=content,
+        content_type=content_type,
+        data_source=data_source,
+        user=user,
+        source_url=requested_url,
+        http_status=http_status,
+        batch_id=task_data["batch_id"],
+        task_id=task_data["task_id"],
+    )
+
+    if pattern == "raw":
+        return {
+            "item_id": raw_item["item_id"],
+            "created_task_count": 0,
+            "result_item_count": 1,
+        }
+
+    if content_type != "application/json":
+        raise HTTPException(
+            status_code=400,
+            detail=f"処理方式{pattern}はJSONレスポンスでのみ利用できます。",
+        )
+
+    try:
+        root_json = json.loads(content.decode("utf-8"))
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"JSONレスポンスを解析できませんでした。 {error}",
+        )
+
+    if pattern == "json_list":
+        created = expand_json_list(
+            root_json=root_json,
+            data_source=data_source,
+            root_task=task_data,
+            user=user,
+        )
+    elif pattern == "parent_child":
+        created = expand_parent_child(
+            root_json=root_json,
+            data_source=data_source,
+            root_task=task_data,
+            user=user,
+            include_grandchildren=False,
+        )
+    elif pattern == "parent_child_grandchild":
+        created = expand_parent_child(
+            root_json=root_json,
+            data_source=data_source,
+            root_task=task_data,
+            user=user,
+            include_grandchildren=True,
+        )
+    elif pattern == "file_links":
+        created = expand_file_links(
+            root_json=root_json,
+            data_source=data_source,
+            root_task=task_data,
+            user=user,
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未対応の処理方式です。 processing_pattern={pattern}",
+        )
+
+    return {
+        "item_id": raw_item["item_id"],
+        "created_task_count": created,
+        "result_item_count": 1,
+    }
+
+
+def execute_save_json_task(*, data_source: dict, user: dict, task_data: dict) -> dict:
+    payload = task_data.get("payload") or {}
+    item = save_json_item(
+        payload=payload.get("data"),
+        data_source=data_source,
+        user=user,
+        batch_id=task_data["batch_id"],
+        task_id=task_data["task_id"],
+        item_type=normalize_text(payload.get("item_type", "item")),
+        level=int(payload.get("level", 1)),
+        parent_id=normalize_text(payload.get("parent_id")) or None,
+        source_index=payload.get("source_index"),
+        item_id=normalize_text(payload.get("fixed_item_id")) or None,
+    )
+    return {"item_id": item["item_id"], "result_item_count": 1}
+
+
+def execute_download_file_task(*, data_source: dict, user: dict, task_data: dict) -> dict:
+    payload = task_data.get("payload") or {}
+    url = normalize_text(payload.get("url", ""))
+    if not url:
+        raise HTTPException(status_code=400, detail="取得対象ファイルURLがありません。")
+
+    content, http_status, content_type = request_file(url, data_source)
+    if http_status < 200 or http_status >= 300:
+        raise HTTPException(status_code=502, detail="ファイル取得先から正常でない応答が返されました。")
+
+    item = save_downloaded_file(
+        content=content,
+        content_type=content_type,
+        source_url=url,
+        data_source=data_source,
+        user=user,
+        batch_id=task_data["batch_id"],
+        task_id=task_data["task_id"],
+        parent_id=normalize_text(payload.get("parent_id")) or None,
+        source_index=payload.get("source_index"),
+    )
+    return {"item_id": item["item_id"], "result_item_count": 1}
+
+
+def execute_import(*, data_source: dict, user: dict, task_data: dict) -> dict:
+    task_type = normalize_key(task_data.get("task_type", "fetch_root"))
+
+    if task_type == "fetch_root":
+        return execute_root_task(
+            data_source=data_source,
+            user=user,
+            task_data=task_data,
+        )
+    if task_type == "save_json_item":
+        return execute_save_json_task(
+            data_source=data_source,
+            user=user,
+            task_data=task_data,
+        )
+    if task_type == "download_file":
+        return execute_download_file_task(
+            data_source=data_source,
+            user=user,
+            task_data=task_data,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"未対応の取込タスクです。 task_type={task_type}",
+    )
