@@ -419,7 +419,6 @@ def save_json_item(
         "gcs_path": gcs_path,
         "gcs_uri": f"gs://{BUCKET_NAME}/{gcs_path}",
         "status": "imported",
-        "data": payload,
         "created_at": now,
         "created_by": user.get("email", ""),
         "updated_at": now,
