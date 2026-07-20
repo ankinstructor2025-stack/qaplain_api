@@ -293,6 +293,50 @@ def list_items(
         else ""
     )
 
+    parent_display_fields = (
+        load_parent_display_fields(
+            normalized_data_source_id
+        )
+        if processing_pattern in (
+            "parent_child",
+            "parent_child_grandchild",
+        )
+        else []
+    )
+
+    if parent_display_fields:
+        for item in latest_items:
+            if normalize_text(item.get("item_type")) != "parent":
+                continue
+
+            try:
+                content, content_type = read_storage_content(item)
+
+                if content_type != "application/json":
+                    item["parent_display_values"] = []
+                    continue
+
+                content_json = json.loads(
+                    content.decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                )
+
+                item["parent_display_values"] = (
+                    build_parent_display_values(
+                        content_json=content_json,
+                        display_fields=parent_display_fields,
+                    )
+                )
+
+            except (
+                HTTPException,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
+                item["parent_display_values"] = []
+
     return {
         "data_source_id": normalized_data_source_id,
         "data_source_name": (
@@ -304,6 +348,7 @@ def list_items(
         "batch_ids": batch_ids,
         "latest_batch_id": latest_batch_id,
         "summary": build_summary(latest_items),
+        "parent_display_fields": parent_display_fields,
         "items": latest_items,
     }
 
