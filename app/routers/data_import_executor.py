@@ -172,14 +172,77 @@ def get_path_value(data, path: str):
     return current
 
 
+def get_path_values(data, path: str) -> list:
+    """
+    ドット区切りのパスをたどり、途中に配列がある場合は
+    その全要素を展開して、終端の値を一覧で返す。
+
+    例:
+        result.results.resources
+
+    は、result.results の全要素について resources を取得し、
+    resources 配列の全要素を1つの一覧にまとめる。
+    """
+    normalized_path = normalize_text(path)
+    if not normalized_path:
+        return [data]
+
+    parts = [
+        part.strip()
+        for part in normalized_path.split(".")
+        if part.strip()
+    ]
+
+    current_values = [data]
+
+    for part in parts:
+        next_values = []
+
+        for current in current_values:
+            targets = current if isinstance(current, list) else [current]
+
+            for target in targets:
+                if isinstance(target, dict):
+                    if part in target:
+                        next_values.append(target[part])
+                    continue
+
+                if isinstance(target, list) and part.isdigit():
+                    index = int(part)
+                    if 0 <= index < len(target):
+                        next_values.append(target[index])
+
+        current_values = next_values
+
+        if not current_values:
+            return []
+
+    flattened_values = []
+
+    def flatten(value) -> None:
+        if isinstance(value, list):
+            for item in value:
+                flatten(item)
+            return
+
+        flattened_values.append(value)
+
+    for value in current_values:
+        flatten(value)
+
+    return flattened_values
+
+
 def get_required_list(data, path: str, label: str) -> list:
-    value = get_path_value(data, path)
-    if not isinstance(value, list):
+    values = get_path_values(data, path)
+
+    if not values:
         raise HTTPException(
             status_code=400,
             detail=f"{label}（{path}）を配列として取得できませんでした。",
         )
-    return value
+
+    return values
 
 
 def get_tenant_task_queue_config(data_source: dict) -> dict:
