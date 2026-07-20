@@ -28,12 +28,20 @@ router = APIRouter(
 
 DATA_SOURCE_COLLECTION = "data_sources"
 PARAMETER_COLLECTION = "parameters"
+PARENT_DISPLAY_FIELD_COLLECTION = "parent_display_fields"
 
 
 class DataSourceParameterRequest(BaseModel):
     parameter_id: str | None = None
     parameter_name: str
     parameter_value: Any = ""
+    display_order: int = 0
+
+
+class ParentDisplayFieldRequest(BaseModel):
+    field_id: str | None = None
+    label: str
+    path: str
     display_order: int = 0
 
 
@@ -70,6 +78,10 @@ class DataSourceRequest(BaseModel):
     enabled: bool = True
 
     parameters: list[DataSourceParameterRequest] = Field(
+        default_factory=list
+    )
+
+    parent_display_fields: list[ParentDisplayFieldRequest] = Field(
         default_factory=list
     )
 
@@ -167,6 +179,11 @@ def validate_data_source_request(
         request.parameters
     )
 
+    validate_parent_display_fields(
+        processing_pattern=request.processing_pattern,
+        fields=request.parent_display_fields
+    )
+
 def validate_authentication(
     request: DataSourceRequest,
     is_update: bool
@@ -249,6 +266,67 @@ def validate_parameters(
 
         duplicate_names.add(
             duplicate_name
+        )
+
+
+def validate_parent_display_fields(
+    processing_pattern: str,
+    fields: list[ParentDisplayFieldRequest]
+):
+    normalized_pattern = validate_processing_pattern(
+        processing_pattern
+    )
+
+    if (
+        normalized_pattern not in (
+            "parent_child",
+            "parent_child_grandchild"
+        )
+        and fields
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "親情報表示項目は親子展開または"
+                "親子孫展開で設定してください。"
+            )
+        )
+
+    duplicate_paths = set()
+
+    for field in fields:
+        label = normalize_text(
+            field.label
+        )
+        path = normalize_text(
+            field.path
+        )
+
+        if not label:
+            raise HTTPException(
+                status_code=400,
+                detail="親情報表示項目の表示名を入力してください。"
+            )
+
+        if not path:
+            raise HTTPException(
+                status_code=400,
+                detail="親情報表示項目のJSON項目パスを入力してください。"
+            )
+
+        duplicate_path = path.lower()
+
+        if duplicate_path in duplicate_paths:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "親情報表示項目に同じJSON項目パスが"
+                    "重複しています。"
+                )
+            )
+
+        duplicate_paths.add(
+            duplicate_path
         )
 
 
@@ -422,6 +500,58 @@ def clear_authentication_fields(
         "scope":
             firestore.DELETE_FIELD
     })
+
+
+def create_parent_display_field_data(
+    field: ParentDisplayFieldRequest,
+    display_order: int
+) -> dict:
+    return {
+        "label":
+            normalize_text(
+                field.label
+            ),
+
+        "path":
+            normalize_text(
+                field.path
+            ),
+
+        "display_order":
+            display_order,
+
+        "updated_at":
+            firestore.SERVER_TIMESTAMP
+    }
+
+
+def serialize_parent_display_field(
+    document
+) -> dict:
+    data = document.to_dict() or {}
+
+    return {
+        "field_id":
+            document.id,
+
+        "label":
+            data.get(
+                "label",
+                ""
+            ),
+
+        "path":
+            data.get(
+                "path",
+                ""
+            ),
+
+        "display_order":
+            data.get(
+                "display_order",
+                0
+            )
+    }
 
 
 def create_parameter_data(
@@ -662,6 +792,92 @@ def load_parameters(
     ]
 
 
+def load_parent_display_fields(
+    document_reference
+) -> list[dict]:
+    field_documents = (
+        document_reference
+        .collection(
+            PARENT_DISPLAY_FIELD_COLLECTION
+        )
+        .order_by(
+            "display_order"
+        )
+        .stream()
+    )
+
+    return [
+        serialize_parent_display_field(
+            document
+        )
+        for document in field_documents
+    ]
+
+
+def replace_parent_display_fields(
+    document_reference,
+    fields: list[ParentDisplayFieldRequest]
+):
+    db = get_db()
+    batch = db.batch()
+
+    existing_documents = (
+        document_reference
+        .collection(
+            PARENT_DISPLAY_FIELD_COLLECTION
+        )
+        .stream()
+    )
+
+    for existing_document in existing_documents:
+        batch.delete(
+            existing_document.reference
+        )
+
+    for index, field in enumerate(
+        fields,
+        start=1
+    ):
+        field_id = normalize_text(
+            field.field_id
+        )
+
+        if field_id:
+            field_reference = (
+                document_reference
+                .collection(
+                    PARENT_DISPLAY_FIELD_COLLECTION
+                )
+                .document(
+                    field_id
+                )
+            )
+        else:
+            field_reference = (
+                document_reference
+                .collection(
+                    PARENT_DISPLAY_FIELD_COLLECTION
+                )
+                .document()
+            )
+
+        field_data = create_parent_display_field_data(
+            field=field,
+            display_order=index
+        )
+
+        field_data["created_at"] = (
+            firestore.SERVER_TIMESTAMP
+        )
+
+        batch.set(
+            field_reference,
+            field_data
+        )
+
+    batch.commit()
+
+
 def replace_parameters(
     document_reference,
     parameters: list[DataSourceParameterRequest]
@@ -775,6 +991,12 @@ def get_data_source(
         )
     )
 
+    data_source["parent_display_fields"] = (
+        load_parent_display_fields(
+            document_reference
+        )
+    )
+
     return {
         "data_source":
             data_source
@@ -818,8 +1040,33 @@ def create_data_source(
             parameters=request.parameters
         )
 
+        replace_parent_display_fields(
+            document_reference=document_reference,
+            fields=request.parent_display_fields
+        )
+
     except Exception:
-        document_reference.delete()
+        cleanup_batch = db.batch()
+
+        for child_collection_name in (
+            PARAMETER_COLLECTION,
+            PARENT_DISPLAY_FIELD_COLLECTION
+        ):
+            for child_document in (
+                document_reference
+                .collection(
+                    child_collection_name
+                )
+                .stream()
+            ):
+                cleanup_batch.delete(
+                    child_document.reference
+                )
+
+        cleanup_batch.delete(
+            document_reference
+        )
+        cleanup_batch.commit()
         raise
 
     return {
@@ -898,6 +1145,11 @@ def update_data_source(
         parameters=request.parameters
     )
 
+    replace_parent_display_fields(
+        document_reference=document_reference,
+        fields=request.parent_display_fields
+    )
+
     return {
         "message":
             "データソースを更新しました。",
@@ -920,18 +1172,22 @@ def delete_data_source(
     db = get_db()
     batch = db.batch()
 
-    parameter_documents = (
-        document_reference
-        .collection(
-            PARAMETER_COLLECTION
+    for child_collection_name in (
+        PARAMETER_COLLECTION,
+        PARENT_DISPLAY_FIELD_COLLECTION
+    ):
+        child_documents = (
+            document_reference
+            .collection(
+                child_collection_name
+            )
+            .stream()
         )
-        .stream()
-    )
 
-    for parameter_document in parameter_documents:
-        batch.delete(
-            parameter_document.reference
-        )
+        for child_document in child_documents:
+            batch.delete(
+                child_document.reference
+            )
 
     batch.delete(
         document_reference
