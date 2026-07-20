@@ -36,6 +36,10 @@ TEXT_CONTENT_TYPES = {
 }
 
 
+DATA_SOURCE_COLLECTION = "data_sources"
+PARENT_DISPLAY_FIELD_COLLECTION = "parent_display_fields"
+
+
 def get_item_document(item_id: str):
     normalized_item_id = normalize_text(item_id)
 
@@ -304,6 +308,117 @@ def list_items(
     }
 
 
+def load_parent_display_fields(
+    data_source_id: str,
+) -> list[dict]:
+    normalized_data_source_id = normalize_text(
+        data_source_id
+    )
+
+    if not normalized_data_source_id:
+        return []
+
+    documents = (
+        get_firestore_client()
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(normalized_data_source_id)
+        .collection(PARENT_DISPLAY_FIELD_COLLECTION)
+        .order_by("display_order")
+        .stream()
+    )
+
+    return [
+        {
+            "field_id": document.id,
+            "label": normalize_text(
+                (document.to_dict() or {}).get("label")
+            ),
+            "path": normalize_text(
+                (document.to_dict() or {}).get("path")
+            ),
+            "display_order": (
+                (document.to_dict() or {}).get(
+                    "display_order",
+                    0,
+                )
+            ),
+        }
+        for document in documents
+        if normalize_text(
+            (document.to_dict() or {}).get("path")
+        )
+    ]
+
+
+def get_json_path_value(
+    source,
+    path: str,
+):
+    current = source
+
+    for part in normalize_text(path).split("."):
+        normalized_part = normalize_text(part)
+
+        if not normalized_part:
+            continue
+
+        if isinstance(current, dict):
+            if normalized_part not in current:
+                return None
+            current = current[normalized_part]
+            continue
+
+        if isinstance(current, list):
+            try:
+                index = int(normalized_part)
+            except (TypeError, ValueError):
+                return None
+
+            if index < 0 or index >= len(current):
+                return None
+
+            current = current[index]
+            continue
+
+        return None
+
+    return current
+
+
+def build_parent_display_values(
+    content_json,
+    display_fields: list[dict],
+) -> list[dict]:
+    if not isinstance(content_json, (dict, list)):
+        return []
+
+    values = []
+
+    for field in display_fields:
+        path = normalize_text(field.get("path"))
+        value = get_json_path_value(
+            content_json,
+            path,
+        )
+
+        values.append({
+            "field_id": normalize_text(
+                field.get("field_id")
+            ),
+            "label": normalize_text(
+                field.get("label")
+            ),
+            "path": path,
+            "display_order": field.get(
+                "display_order",
+                0,
+            ),
+            "value": serialize_value(value),
+        })
+
+    return values
+
+
 @router.get("/items/{item_id}")
 def get_item(
     item_id: str,
@@ -326,11 +441,26 @@ def get_item(
             except json.JSONDecodeError:
                 pass
 
+    serialized_item = serialize_item_detail(document)
+    parent_display_fields = []
+    parent_display_values = []
+
+    if normalize_text(item.get("item_type")) == "parent":
+        parent_display_fields = load_parent_display_fields(
+            item.get("data_source_id")
+        )
+        parent_display_values = build_parent_display_values(
+            content_json=content_json,
+            display_fields=parent_display_fields,
+        )
+
     return {
-        "item": serialize_item_detail(document),
+        "item": serialized_item,
         "content_available": content_text is not None,
         "content_text": content_text,
         "content_json": content_json,
+        "parent_display_fields": parent_display_fields,
+        "parent_display_values": parent_display_values,
     }
 
 
