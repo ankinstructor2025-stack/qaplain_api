@@ -18,11 +18,9 @@ from app.routers.data_raw_processor import (
     process_source_file,
 )
 from app.routers.data_raw_tasks import (
-    authenticate_task,
     create_batch,
-    dispatch_batch,
+    execute_data_raw_worker,
     get_analysis_summary,
-    process_batch_item,
 )
 
 
@@ -37,9 +35,6 @@ class DataRawProcessRequest(
 ):
     source_type: str = Field(
         min_length=1,
-        description=(
-            "uploaded_file または api_import"
-        ),
     )
 
     source_id: str = Field(
@@ -57,9 +52,13 @@ class DataRawBatchRequest(
     )
 
 
-class DataRawTaskRequest(
+class DataRawWorkerRequest(
     BaseModel
 ):
+    task_type: str = Field(
+        min_length=1,
+    )
+
     batch_id: str = Field(
         min_length=1,
     )
@@ -82,10 +81,14 @@ def process_data_raw(
     )
 
     return process_source_file(
-        source_type=request.source_type,
-        source_id=request.source_id,
-        overwrite=request.overwrite,
-        user=user,
+        source_type=
+            request.source_type,
+        source_id=
+            request.source_id,
+        overwrite=
+            request.overwrite,
+        user=
+            user,
     )
 
 
@@ -125,43 +128,24 @@ def start_data_raw_batch(
     return create_batch(
         data_source_id=
             request.data_source_id,
-        user=user,
+        user=
+            user,
     )
 
 
 @router.post(
-    "/tasks/dispatch",
+    "/tasks/worker",
     include_in_schema=False,
 )
-def execute_data_raw_dispatch(
-    request: DataRawTaskRequest,
+def execute_worker(
+    request: DataRawWorkerRequest,
     authorization: str = Header(...),
 ):
-    authenticate_task(
-        authorization
-    )
-
-    return dispatch_batch(
-        batch_id=request.batch_id,
-    )
-
-
-@router.post(
-    "/tasks/process",
-    include_in_schema=False,
-)
-def execute_data_raw_task(
-    request: DataRawTaskRequest,
-    authorization: str = Header(...),
-):
-    authenticate_task(
-        authorization
-    )
-
-    return process_batch_item(
-        batch_id=request.batch_id,
-        source_type=request.source_type,
-        source_id=request.source_id,
+    return execute_data_raw_worker(
+        request=
+            request,
+        authorization=
+            authorization,
     )
 
 
@@ -190,11 +174,20 @@ def get_data_raw_document(
 
         raise HTTPException(
             status_code=404,
-            detail="元データが見つかりません。",
+            detail=(
+                "元データが"
+                "見つかりません。"
+            ),
         )
 
-    data = document.to_dict() or {}
-    data["document_id"] = document.id
+    data = (
+        document.to_dict()
+        or {}
+    )
+
+    data["document_id"] = (
+        document.id
+    )
 
     return serialize_value(data)
 
@@ -236,8 +229,15 @@ def get_data_raw_records(
     records = []
 
     for document in documents:
-        data = document.to_dict() or {}
-        data["record_id"] = document.id
+        data = (
+            document.to_dict()
+            or {}
+        )
+
+        data["record_id"] = (
+            document.id
+        )
+
         records.append(
             serialize_value(data)
         )

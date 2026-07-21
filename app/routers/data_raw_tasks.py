@@ -1,15 +1,19 @@
-import json
 import os
 import uuid
-from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from google.cloud import firestore
-from google.cloud import tasks_v2
 
+from app.core.cloud_tasks import (
+    CLOUD_TASKS_AUDIENCE,
+    CLOUD_TASKS_WORKER_URL,
+    authenticate_cloud_task,
+    create_http_task,
+    ensure_task_queue,
+)
 from app.core.firebase import (
     get_firestore_client,
-    verify_id_token,
 )
 from app.routers.data_import_common import (
     normalize_text,
@@ -26,192 +30,138 @@ DATA_RAW_BATCH_COLLECTION = (
     "data_raw_batches"
 )
 
-TASK_PROJECT_ID = os.getenv(
-    "GOOGLE_CLOUD_PROJECT",
-    os.getenv(
-        "GCP_PROJECT",
-        "",
-    ),
-)
-
-TASK_LOCATION = os.getenv(
-    "TASK_LOCATION",
-    "asia-northeast1",
-)
-
-TASK_QUEUE = os.getenv(
-    "DATA_RAW_TASK_QUEUE",
+DATA_RAW_QUEUE_PREFIX = os.getenv(
+    "DATA_RAW_QUEUE_PREFIX",
     "data-raw",
 )
 
-SERVICE_BASE_URL = os.getenv(
-    "SERVICE_BASE_URL",
-    "",
-).rstrip("/")
-
-TASK_SERVICE_ACCOUNT = os.getenv(
-    "TASK_SERVICE_ACCOUNT",
-    "",
-)
-
-TASK_AUDIENCE = os.getenv(
-    "TASK_AUDIENCE",
-    SERVICE_BASE_URL,
-)
-
-TASK_SERVICE_ACCOUNT_EMAILS = {
-    normalize_text(value).lower()
-    for value in os.getenv(
-        "TASK_SERVICE_ACCOUNT_EMAILS",
-        TASK_SERVICE_ACCOUNT,
-    ).split(",")
-    if normalize_text(value)
-}
+DATA_RAW_TASK_CONCURRENCY = 5
 
 
-def authenticate_task(
-    authorization: str,
-) -> dict:
-    if not authorization.startswith(
-        "Bearer "
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Cloud Tasks認証情報がありません。",
-        )
+def get_data_raw_worker_url() -> str:
+    configured_url = normalize_text(
+        CLOUD_TASKS_WORKER_URL
+    )
 
-    token = authorization.replace(
-        "Bearer ",
-        "",
-        1,
-    ).strip()
-
-    try:
-        decoded = verify_id_token(token)
-    except Exception as error:
-        print(
-            "Cloud Tasks token error: "
-            f"{type(error).__name__}: {error}"
-        )
-        raise HTTPException(
-            status_code=401,
-            detail="Cloud Tasks認証を確認できません。",
-        )
-
-    email = normalize_text(
-        decoded.get("email")
-    ).lower()
-
-    if (
-        TASK_SERVICE_ACCOUNT_EMAILS
-        and email
-        not in TASK_SERVICE_ACCOUNT_EMAILS
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "許可されていない"
-                "Cloud Tasks実行ユーザーです。"
-            ),
-        )
-
-    return decoded
-
-
-def validate_task_settings() -> None:
-    missing = []
-
-    if not TASK_PROJECT_ID:
-        missing.append(
-            "GOOGLE_CLOUD_PROJECT"
-        )
-
-    if not TASK_LOCATION:
-        missing.append(
-            "TASK_LOCATION"
-        )
-
-    if not TASK_QUEUE:
-        missing.append(
-            "DATA_RAW_TASK_QUEUE"
-        )
-
-    if not SERVICE_BASE_URL:
-        missing.append(
-            "SERVICE_BASE_URL"
-        )
-
-    if not TASK_SERVICE_ACCOUNT:
-        missing.append(
-            "TASK_SERVICE_ACCOUNT"
-        )
-
-    if missing:
+    if not configured_url:
         raise HTTPException(
             status_code=500,
             detail=(
-                "Cloud Tasks設定が不足しています: "
-                + ", ".join(missing)
+                "CLOUD_TASKS_WORKER_URLが"
+                "設定されていません。"
+            ),
+        )
+
+    parsed = urlsplit(
+        configured_url
+    )
+
+    if not parsed.scheme or not parsed.netloc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "CLOUD_TASKS_WORKER_URLの"
+                "形式が正しくありません。"
+            ),
+        )
+
+    base_url = (
+        f"{parsed.scheme}://"
+        f"{parsed.netloc}"
+    )
+
+    return (
+        f"{base_url}"
+        "/v1/data-raw/tasks/worker"
+    )
+
+
+def get_data_raw_queue(
+    data_source_id: str,
+) -> dict:
+    normalized_data_source_id = (
+        normalize_text(
+            data_source_id
+        )
+    )
+
+    if not normalized_data_source_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "データソースIDが"
+                "指定されていません。"
+            ),
+        )
+
+    try:
+        return ensure_task_queue(
+            identifier=
+                normalized_data_source_id,
+            concurrency=
+                DATA_RAW_TASK_CONCURRENCY,
+            prefix=
+                DATA_RAW_QUEUE_PREFIX,
+        )
+
+    except Exception as error:
+        print(
+            "Data Raw queue setup error: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "データ解析用Cloud Tasks"
+                "キューを準備できませんでした。"
             ),
         )
 
 
-def create_http_task(
+def enqueue_data_raw_task(
     *,
-    path: str,
+    queue_full_name: str,
     payload: dict,
-) -> str:
-    validate_task_settings()
-
-    client = tasks_v2.CloudTasksClient()
-
-    parent = client.queue_path(
-        TASK_PROJECT_ID,
-        TASK_LOCATION,
-        TASK_QUEUE,
+):
+    worker_url = (
+        get_data_raw_worker_url()
     )
 
-    body = json.dumps(
-        payload,
-        ensure_ascii=False,
-    ).encode("utf-8")
+    # 認証側は既存Cloud Tasks設定と
+    # 同じAudienceを使用する。
+    audience = normalize_text(
+        CLOUD_TASKS_AUDIENCE
+        or CLOUD_TASKS_WORKER_URL
+    )
 
-    task = tasks_v2.Task(
-        http_request=
-            tasks_v2.HttpRequest(
-                http_method=
-                    tasks_v2.HttpMethod.POST,
-                url=(
-                    f"{SERVICE_BASE_URL}"
-                    f"{path}"
-                ),
-                headers={
-                    "Content-Type":
-                        "application/json",
-                },
-                oidc_token=
-                    tasks_v2.OidcToken(
-                        service_account_email=
-                            TASK_SERVICE_ACCOUNT,
-                        audience=(
-                            TASK_AUDIENCE
-                            or SERVICE_BASE_URL
-                        ),
-                    ),
-                body=body,
+    try:
+        return create_http_task(
+            queue_full_name=
+                queue_full_name,
+            payload=
+                payload,
+            worker_url=
+                worker_url,
+            audience=
+                audience,
+        )
+
+    except Exception as error:
+        print(
+            "Data Raw task enqueue error: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "データ解析タスクを"
+                "登録できませんでした。"
             ),
-    )
-
-    response = client.create_task(
-        request={
-            "parent":
-                parent,
-            "task":
-                task,
-        }
-    )
-
-    return response.name
+        )
 
 
 def create_batch(
@@ -234,6 +184,12 @@ def create_batch(
             ),
         )
 
+    queue_config = (
+        get_data_raw_queue(
+            normalized_data_source_id
+        )
+    )
+
     batch_id = uuid.uuid4().hex
     now = now_iso()
 
@@ -242,6 +198,12 @@ def create_batch(
             batch_id,
         "data_source_id":
             normalized_data_source_id,
+        "queue_id":
+            queue_config["queue_id"],
+        "task_concurrency":
+            queue_config[
+                "task_concurrency"
+            ],
         "status":
             "queued",
         "total_count":
@@ -251,8 +213,6 @@ def create_batch(
         "completed_count":
             0,
         "failed_count":
-            0,
-        "skipped_count":
             0,
         "created_at":
             now,
@@ -273,12 +233,14 @@ def create_batch(
     reference.set(data)
 
     try:
-        task_name = create_http_task(
-            path=(
-                "/v1/data-raw/tasks/"
-                "dispatch"
-            ),
+        task = enqueue_data_raw_task(
+            queue_full_name=
+                queue_config[
+                    "queue_full_name"
+                ],
             payload={
+                "task_type":
+                    "data_raw_dispatch",
                 "batch_id":
                     batch_id,
             },
@@ -286,7 +248,7 @@ def create_batch(
 
         reference.set({
             "dispatch_task_name":
-                task_name,
+                task.name,
             "updated_at":
                 now_iso(),
         }, merge=True)
@@ -296,7 +258,10 @@ def create_batch(
             "status":
                 "failed",
             "error_message":
-                "一括解析タスクを登録できませんでした。",
+                (
+                    "一括解析タスクを"
+                    "登録できませんでした。"
+                ),
             "updated_at":
                 now_iso(),
         }, merge=True)
@@ -308,17 +273,19 @@ def create_batch(
             "queued",
         "batch_id":
             batch_id,
+        "queue_id":
+            queue_config["queue_id"],
         "message":
             "一括解析を受け付けました。",
     }
 
 
-def _iter_source_documents(
+def iter_source_documents(
     data_source_id: str,
 ):
     db = get_firestore_client()
 
-    collection_definitions = (
+    definitions = (
         (
             "uploaded_file",
             UPLOADED_FILE_COLLECTION,
@@ -332,7 +299,7 @@ def _iter_source_documents(
     for (
         source_type,
         collection_name,
-    ) in collection_definitions:
+    ) in definitions:
 
         documents = (
             db.collection(
@@ -347,7 +314,10 @@ def _iter_source_documents(
         )
 
         for document in documents:
-            data = document.to_dict() or {}
+            data = (
+                document.to_dict()
+                or {}
+            )
 
             if data.get(
                 "deleted",
@@ -360,6 +330,8 @@ def _iter_source_documents(
                     source_type,
                 "source_id":
                     document.id,
+                "collection_name":
+                    collection_name,
                 "data":
                     data,
             }
@@ -402,6 +374,7 @@ def dispatch_batch(
         "dispatching",
         "running",
         "completed",
+        "completed_with_errors",
     }:
         return {
             "status":
@@ -413,6 +386,12 @@ def dispatch_batch(
     data_source_id = normalize_text(
         batch_data.get(
             "data_source_id"
+        )
+    )
+
+    queue_config = (
+        get_data_raw_queue(
+            data_source_id
         )
     )
 
@@ -429,7 +408,7 @@ def dispatch_batch(
     }, merge=True)
 
     sources = list(
-        _iter_source_documents(
+        iter_source_documents(
             data_source_id
         )
     )
@@ -476,32 +455,57 @@ def dispatch_batch(
         }
 
     queued_count = 0
-    failed_to_queue_count = 0
+    enqueue_failed_count = 0
 
     for source in pending_sources:
         try:
-            create_http_task(
-                path=(
-                    "/v1/data-raw/tasks/"
-                    "process"
-                ),
+            task = enqueue_data_raw_task(
+                queue_full_name=
+                    queue_config[
+                        "queue_full_name"
+                    ],
                 payload={
+                    "task_type":
+                        "data_raw_process",
                     "batch_id":
                         batch_id,
                     "source_type":
-                        source["source_type"],
+                        source[
+                            "source_type"
+                        ],
                     "source_id":
-                        source["source_id"],
+                        source[
+                            "source_id"
+                        ],
                 },
             )
 
             queued_count += 1
 
+            (
+                db.collection(
+                    source["collection_name"]
+                )
+                .document(
+                    source["source_id"]
+                )
+                .set({
+                    "analysis_status":
+                        "queued",
+                    "analysis_batch_id":
+                        batch_id,
+                    "analysis_task_name":
+                        task.name,
+                    "updated_at":
+                        now_iso(),
+                }, merge=True)
+            )
+
         except Exception as error:
-            failed_to_queue_count += 1
+            enqueue_failed_count += 1
 
             print(
-                "data raw task enqueue error: "
+                "Data Raw item enqueue error: "
                 f"{source['source_id']} "
                 f"{type(error).__name__}: "
                 f"{error}"
@@ -509,13 +513,13 @@ def dispatch_batch(
 
         if (
             queued_count
-            + failed_to_queue_count
+            + enqueue_failed_count
         ) % 25 == 0:
             batch_reference.set({
                 "queued_count":
                     queued_count,
                 "failed_count":
-                    failed_to_queue_count,
+                    enqueue_failed_count,
                 "updated_at":
                     now_iso(),
             }, merge=True)
@@ -532,7 +536,7 @@ def dispatch_batch(
         "queued_count":
             queued_count,
         "failed_count":
-            failed_to_queue_count,
+            enqueue_failed_count,
         "updated_at":
             now_iso(),
     }, merge=True)
@@ -547,12 +551,12 @@ def dispatch_batch(
         "queued_count":
             queued_count,
         "failed_count":
-            failed_to_queue_count,
+            enqueue_failed_count,
     }
 
 
 @firestore.transactional
-def _update_batch_result(
+def update_batch_result(
     transaction,
     batch_reference,
     *,
@@ -562,7 +566,10 @@ def _update_batch_result(
         transaction=transaction
     )
 
-    data = snapshot.to_dict() or {}
+    data = (
+        snapshot.to_dict()
+        or {}
+    )
 
     completed_count = int(
         data.get(
@@ -598,7 +605,7 @@ def _update_batch_result(
         + failed_count
     )
 
-    update_data = {
+    values = {
         "completed_count":
             completed_count,
         "failed_count":
@@ -611,22 +618,23 @@ def _update_batch_result(
         total_count > 0
         and finished_count >= total_count
     ):
-        update_data.update({
-            "status":
+        values.update({
+            "status": (
                 "completed_with_errors"
                 if failed_count > 0
-                else "completed",
+                else "completed"
+            ),
             "completed_at":
                 now_iso(),
         })
 
     transaction.set(
         batch_reference,
-        update_data,
+        values,
         merge=True,
     )
 
-    return update_data
+    return values
 
 
 def process_batch_item(
@@ -660,7 +668,7 @@ def process_batch_item(
 
         transaction = db.transaction()
 
-        _update_batch_result(
+        update_batch_result(
             transaction,
             batch_reference,
             success=True,
@@ -671,13 +679,51 @@ def process_batch_item(
     except Exception:
         transaction = db.transaction()
 
-        _update_batch_result(
+        update_batch_result(
             transaction,
             batch_reference,
             success=False,
         )
 
         raise
+
+
+def execute_data_raw_worker(
+    *,
+    request,
+    authorization: str,
+) -> dict:
+    authenticate_cloud_task(
+        authorization
+    )
+
+    task_type = normalize_text(
+        request.task_type
+    )
+
+    if task_type == "data_raw_dispatch":
+        return dispatch_batch(
+            batch_id=
+                request.batch_id,
+        )
+
+    if task_type == "data_raw_process":
+        return process_batch_item(
+            batch_id=
+                request.batch_id,
+            source_type=
+                request.source_type,
+            source_id=
+                request.source_id,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "未対応のデータ解析"
+            f"タスクです: {task_type}"
+        ),
+    )
 
 
 def get_analysis_summary(
@@ -694,7 +740,7 @@ def get_analysis_summary(
     failed_count = 0
     running_count = 0
 
-    for source in _iter_source_documents(
+    for source in iter_source_documents(
         normalized_data_source_id
     ):
         total_count += 1
@@ -725,8 +771,6 @@ def get_analysis_summary(
         0,
     )
 
-    latest_batch = None
-
     batches = (
         get_firestore_client()
         .collection(
@@ -740,14 +784,17 @@ def get_analysis_summary(
         .stream()
     )
 
-    batch_values = []
+    values = []
 
     for document in batches:
-        data = document.to_dict() or {}
+        data = (
+            document.to_dict()
+            or {}
+        )
         data["batch_id"] = document.id
-        batch_values.append(data)
+        values.append(data)
 
-    batch_values.sort(
+    values.sort(
         key=lambda item:
             normalize_text(
                 item.get(
@@ -756,9 +803,6 @@ def get_analysis_summary(
             ),
         reverse=True,
     )
-
-    if batch_values:
-        latest_batch = batch_values[0]
 
     return {
         "data_source_id":
@@ -773,6 +817,9 @@ def get_analysis_summary(
             running_count,
         "failed_count":
             failed_count,
-        "latest_batch":
-            latest_batch,
+        "latest_batch": (
+            values[0]
+            if values
+            else None
+        ),
     }
