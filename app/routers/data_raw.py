@@ -17,6 +17,13 @@ from app.routers.data_raw_processor import (
     RAW_RECORD_SUBCOLLECTION,
     process_source_file,
 )
+from app.routers.data_raw_tasks import (
+    authenticate_task,
+    create_batch,
+    dispatch_batch,
+    get_analysis_summary,
+    process_batch_item,
+)
 
 
 router = APIRouter(
@@ -42,6 +49,26 @@ class DataRawProcessRequest(
     overwrite: bool = True
 
 
+class DataRawBatchRequest(
+    BaseModel
+):
+    data_source_id: str = Field(
+        min_length=1,
+    )
+
+
+class DataRawTaskRequest(
+    BaseModel
+):
+    batch_id: str = Field(
+        min_length=1,
+    )
+
+    source_type: str = ""
+
+    source_id: str = ""
+
+
 @router.post(
     "/process",
     status_code=201,
@@ -59,6 +86,82 @@ def process_data_raw(
         source_id=request.source_id,
         overwrite=request.overwrite,
         user=user,
+    )
+
+
+@router.get(
+    "/summary",
+)
+def get_data_raw_summary(
+    data_source_id: str = Query(
+        ...,
+        min_length=1,
+    ),
+    authorization: str = Header(...),
+):
+    authenticate_user(
+        authorization
+    )
+
+    return serialize_value(
+        get_analysis_summary(
+            data_source_id
+        )
+    )
+
+
+@router.post(
+    "/batch",
+    status_code=202,
+)
+def start_data_raw_batch(
+    request: DataRawBatchRequest,
+    authorization: str = Header(...),
+):
+    user = authenticate_user(
+        authorization
+    )
+
+    return create_batch(
+        data_source_id=
+            request.data_source_id,
+        user=user,
+    )
+
+
+@router.post(
+    "/tasks/dispatch",
+    include_in_schema=False,
+)
+def execute_data_raw_dispatch(
+    request: DataRawTaskRequest,
+    authorization: str = Header(...),
+):
+    authenticate_task(
+        authorization
+    )
+
+    return dispatch_batch(
+        batch_id=request.batch_id,
+    )
+
+
+@router.post(
+    "/tasks/process",
+    include_in_schema=False,
+)
+def execute_data_raw_task(
+    request: DataRawTaskRequest,
+    authorization: str = Header(...),
+):
+    authenticate_task(
+        authorization
+    )
+
+    return process_batch_item(
+        batch_id=request.batch_id,
+        source_type=request.source_type,
+        source_id=request.source_id,
     )
 
 
