@@ -538,6 +538,69 @@ def get_tasks(
         else 0.0
     )
 
+    root_tasks = [
+        task
+        for task in tasks
+        if normalize_key(
+            task.get(
+                "task_type",
+                "",
+            )
+        ) == "fetch_root"
+    ]
+
+    detail_tasks = [
+        task
+        for task in tasks
+        if normalize_key(
+            task.get(
+                "task_type",
+                "",
+            )
+        ) != "fetch_root"
+    ]
+
+    def count_finished(
+        target_tasks: list[dict],
+    ) -> int:
+        return sum(
+            1
+            for task in target_tasks
+            if normalize_key(
+                task.get(
+                    "status",
+                    "",
+                )
+            )
+            in {
+                "completed",
+                "failed",
+                "enqueue_failed",
+            }
+        )
+
+    if total_count == 0:
+        batch_status = "not_started"
+    elif active_count > 0:
+        batch_status = "running"
+    elif failed_count > 0:
+        batch_status = "failed"
+    else:
+        batch_status = "completed"
+
+    updated_at = max(
+        (
+            normalize_text(
+                task.get(
+                    "updated_at",
+                    "",
+                )
+            )
+            for task in tasks
+        ),
+        default="",
+    )
+
     return {
         "data_source_id": normalize_text(
             data_source_id
@@ -545,6 +608,7 @@ def get_tasks(
         "batch_id": normalize_text(
             batch_id
         ),
+        "status": batch_status,
         "total_count": total_count,
         "completed_count": status_counts["completed"],
         "running_count": status_counts["running"],
@@ -554,6 +618,15 @@ def get_tasks(
         "active_count": active_count,
         "active": active_count > 0,
         "progress_percent": progress_percent,
+        "root_total": len(root_tasks),
+        "root_completed": count_finished(
+            root_tasks
+        ),
+        "detail_total": len(detail_tasks),
+        "detail_completed": count_finished(
+            detail_tasks
+        ),
+        "updated_at": updated_at,
         "status_counts": status_counts,
         "tasks": tasks,
         "count": total_count,
