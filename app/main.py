@@ -2,7 +2,6 @@ from fastapi import FastAPI
 
 from app.core.cors import setup_cors
 from app.core.firebase import initialize_firebase
-
 from app.routers.session import router as session_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.general_user import router as general_user_router
@@ -12,6 +11,7 @@ from app.routers.authentication_methods import router as authentication_methods_
 from app.routers.data_sources import router as data_sources_router
 from app.routers.data_import import router as data_import_router
 from app.routers.data_view import router as data_view_router
+from app.routers.data_raw import router as data_raw_router
 
 def create_app() -> FastAPI:
     # Firebase Admin SDK 初期化
@@ -33,8 +33,8 @@ def create_app() -> FastAPI:
     app.include_router(data_sources_router)
     app.include_router(data_import_router)
     app.include_router(data_view_router)
+    app.include_router(data_raw_router)
 
     return app
-
 
 app = create_app()
