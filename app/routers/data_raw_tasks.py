@@ -35,7 +35,11 @@ DATA_RAW_QUEUE_PREFIX = os.getenv(
     "data-raw",
 )
 
-DATA_RAW_TASK_CONCURRENCY = 5
+DATA_SOURCE_COLLECTION = "data_sources"
+TENANT_COLLECTION = "tenants"
+
+DEFAULT_TASK_CONCURRENCY = 1
+DEFAULT_TASK_MAX_ATTEMPTS = 5
 
 
 def get_data_raw_worker_url() -> str:
@@ -76,6 +80,90 @@ def get_data_raw_worker_url() -> str:
     )
 
 
+def get_task_settings(
+    data_source_id: str,
+) -> dict:
+    db = get_firestore_client()
+
+    data_source_document = (
+        db.collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .document(
+            data_source_id
+        )
+        .get()
+    )
+
+    if not data_source_document.exists:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "データソースが"
+                "見つかりません。"
+            ),
+        )
+
+    data_source = (
+        data_source_document.to_dict()
+        or {}
+    )
+
+    tenant_id = normalize_text(
+        data_source.get(
+            "tenant_id"
+        )
+    )
+
+    if not tenant_id:
+        return {
+            "tenant_id": "",
+            "task_concurrency":
+                DEFAULT_TASK_CONCURRENCY,
+            "task_max_attempts":
+                DEFAULT_TASK_MAX_ATTEMPTS,
+        }
+
+    tenant_document = (
+        db.collection(
+            TENANT_COLLECTION
+        )
+        .document(
+            tenant_id
+        )
+        .get()
+    )
+
+    if not tenant_document.exists:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "データソースに設定された"
+                "テナントが見つかりません。"
+            ),
+        )
+
+    tenant = (
+        tenant_document.to_dict()
+        or {}
+    )
+
+    return {
+        "tenant_id":
+            tenant_id,
+        "task_concurrency":
+            tenant.get(
+                "task_concurrency",
+                DEFAULT_TASK_CONCURRENCY,
+            ),
+        "task_max_attempts":
+            tenant.get(
+                "task_max_attempts",
+                DEFAULT_TASK_MAX_ATTEMPTS,
+            ),
+    }
+
+
 def get_data_raw_queue(
     data_source_id: str,
 ) -> dict:
@@ -94,12 +182,22 @@ def get_data_raw_queue(
             ),
         )
 
+    task_settings = get_task_settings(
+        normalized_data_source_id
+    )
+
     try:
         return ensure_task_queue(
             identifier=
                 normalized_data_source_id,
             concurrency=
-                DATA_RAW_TASK_CONCURRENCY,
+                task_settings[
+                    "task_concurrency"
+                ],
+            max_attempts=
+                task_settings[
+                    "task_max_attempts"
+                ],
             prefix=
                 DATA_RAW_QUEUE_PREFIX,
         )
@@ -204,6 +302,10 @@ def create_batch(
             queue_config[
                 "task_concurrency"
             ],
+        "task_max_attempts":
+            queue_config[
+                "task_max_attempts"
+            ],
         "status":
             "queued",
         "total_count":
@@ -275,6 +377,14 @@ def create_batch(
             batch_id,
         "queue_id":
             queue_config["queue_id"],
+        "task_concurrency":
+            queue_config[
+                "task_concurrency"
+            ],
+        "task_max_attempts":
+            queue_config[
+                "task_max_attempts"
+            ],
         "message":
             "一括解析を受け付けました。",
     }
