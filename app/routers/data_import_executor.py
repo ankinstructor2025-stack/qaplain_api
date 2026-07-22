@@ -20,8 +20,10 @@ from app.routers.data_import_common import (
     DATA_IMPORT_TASK_COLLECTION,
     TENANT_COLLECTION,
     build_requested_url,
+    get_content_extension,
     get_storage_bucket,
     normalize_content_type,
+    normalize_extension,
     normalize_key,
     normalize_text,
     now_iso,
@@ -848,15 +850,91 @@ def execute_save_json_task(*, data_source: dict, user: dict, task_data: dict) ->
     return {"item_id": item["item_id"], "result_item_count": 1}
 
 
-def execute_download_file_task(*, data_source: dict, user: dict, task_data: dict) -> dict:
+def execute_download_file_task(
+    *,
+    data_source: dict,
+    user: dict,
+    task_data: dict,
+) -> dict:
     payload = task_data.get("payload") or {}
-    url = normalize_text(payload.get("url", ""))
-    if not url:
-        raise HTTPException(status_code=400, detail="取得対象ファイルURLがありません。")
 
-    content, http_status, content_type = request_file(url, data_source)
-    if http_status < 200 or http_status >= 300:
-        raise HTTPException(status_code=502, detail="ファイル取得先から正常でない応答が返されました。")
+    url = normalize_text(
+        payload.get("url", "")
+    )
+
+    if not url:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "取得対象ファイルURLが"
+                "ありません。"
+            ),
+        )
+
+    content, http_status, content_type = (
+        request_file(
+            url,
+            data_source,
+        )
+    )
+
+    if (
+        http_status < 200
+        or http_status >= 300
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "ファイル取得先から"
+                "正常でない応答が返されました。"
+            ),
+        )
+
+    extension = normalize_extension(
+        get_content_extension(
+            content_type,
+            url,
+            data_source,
+        )
+    )
+
+    allowed_extensions = {
+        normalize_extension(value)
+        for value in (
+            data_source.get(
+                "file_extensions",
+                [],
+            )
+            or []
+        )
+        if normalize_extension(value)
+    }
+
+    if extension not in allowed_extensions:
+        print(
+            "[DATA_IMPORT_SKIP] "
+            f"data_source_id="
+            f"{data_source.get('data_source_id', '')}, "
+            f"task_id="
+            f"{task_data.get('task_id', '')}, "
+            f"url={url}, "
+            f"content_type={content_type}, "
+            f"extension={extension or '(empty)'}, "
+            "reason=extension_not_selected"
+        )
+
+        return {
+            "status":
+                "skipped",
+            "reason":
+                "extension_not_selected",
+            "extension":
+                extension,
+            "source_url":
+                url,
+            "result_item_count":
+                0,
+        }
 
     item = save_downloaded_file(
         content=content,
@@ -866,15 +944,30 @@ def execute_download_file_task(*, data_source: dict, user: dict, task_data: dict
         user=user,
         batch_id=task_data["batch_id"],
         task_id=task_data["task_id"],
-        parent_id=normalize_text(payload.get("parent_id")) or None,
-        source_index=payload.get("source_index"),
+        parent_id=(
+            normalize_text(
+                payload.get("parent_id")
+            )
+            or None
+        ),
+        source_index=
+            payload.get("source_index"),
         source_metadata=(
             payload.get("source_metadata")
-            if isinstance(payload.get("source_metadata"), dict)
+            if isinstance(
+                payload.get("source_metadata"),
+                dict,
+            )
             else {}
         ),
     )
-    return {"item_id": item["item_id"], "result_item_count": 1}
+
+    return {
+        "item_id":
+            item["item_id"],
+        "result_item_count":
+            1,
+    }
 
 
 def execute_import(*, data_source: dict, user: dict, task_data: dict) -> dict:
