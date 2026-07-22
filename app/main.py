@@ -12,6 +12,7 @@ from app.routers.data_sources import router as data_sources_router
 from app.routers.data_import import router as data_import_router
 from app.routers.data_view import router as data_view_router
 from app.routers.data_raw import router as data_raw_router
+from app.routers.raw_data_view import router as raw_data_view_router
 
 def create_app() -> FastAPI:
     # Firebase Admin SDK 初期化
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(data_import_router)
     app.include_router(data_view_router)
     app.include_router(data_raw_router)
+    app.include_router(raw_data_view_router)
 
     return app
 
