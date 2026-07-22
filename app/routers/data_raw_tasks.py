@@ -280,6 +280,114 @@ def create_batch(
     }
 
 
+def reset_analysis_state(
+    *,
+    data_source_id: str,
+    user: dict,
+) -> dict:
+    normalized_data_source_id = (
+        normalize_text(
+            data_source_id
+        )
+    )
+
+    if not normalized_data_source_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "データソースを"
+                "選択してください。"
+            ),
+        )
+
+    db = get_firestore_client()
+
+    reset_source_count = 0
+
+    for source in iter_source_documents(
+        normalized_data_source_id
+    ):
+        source_reference = (
+            db.collection(
+                source["collection_name"]
+            )
+            .document(
+                source["source_id"]
+            )
+        )
+
+        source_reference.set({
+            "analysis_status":
+                firestore.DELETE_FIELD,
+            "analysis_batch_id":
+                firestore.DELETE_FIELD,
+            "analysis_task_name":
+                firestore.DELETE_FIELD,
+            "analysis_error":
+                firestore.DELETE_FIELD,
+            "analysis_error_message":
+                firestore.DELETE_FIELD,
+            "analysis_started_at":
+                firestore.DELETE_FIELD,
+            "analysis_completed_at":
+                firestore.DELETE_FIELD,
+            "updated_at":
+                now_iso(),
+        }, merge=True)
+
+        reset_source_count += 1
+
+    batch_documents = list(
+        db.collection(
+            DATA_RAW_BATCH_COLLECTION
+        )
+        .where(
+            "data_source_id",
+            "==",
+            normalized_data_source_id,
+        )
+        .stream()
+    )
+
+    deleted_batch_count = 0
+
+    for offset in range(
+        0,
+        len(batch_documents),
+        400,
+    ):
+        write_batch = db.batch()
+        chunk = batch_documents[
+            offset:offset + 400
+        ]
+
+        for document in chunk:
+            write_batch.delete(
+                document.reference
+            )
+
+        if chunk:
+            write_batch.commit()
+            deleted_batch_count += (
+                len(chunk)
+            )
+
+    return {
+        "status":
+            "reset",
+        "data_source_id":
+            normalized_data_source_id,
+        "reset_source_count":
+            reset_source_count,
+        "deleted_batch_count":
+            deleted_batch_count,
+        "reset_by":
+            user.get("email", ""),
+        "message":
+            "解析状態をリセットしました。",
+    }
+
+
 def iter_source_documents(
     data_source_id: str,
 ):

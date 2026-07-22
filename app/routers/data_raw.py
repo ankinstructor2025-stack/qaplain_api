@@ -21,6 +21,7 @@ from app.routers.data_raw_tasks import (
     create_batch,
     execute_data_raw_worker,
     get_analysis_summary,
+    reset_analysis_state,
 )
 
 
@@ -126,6 +127,25 @@ def start_data_raw_batch(
     )
 
     return create_batch(
+        data_source_id=
+            request.data_source_id,
+        user=
+            user,
+    )
+
+
+@router.post(
+    "/batch/reset",
+)
+def reset_data_raw_batch(
+    request: DataRawBatchRequest,
+    authorization: str = Header(...),
+):
+    user = authenticate_user(
+        authorization
+    )
+
+    return reset_analysis_state(
         data_source_id=
             request.data_source_id,
         user=
