@@ -963,6 +963,7 @@ def get_analysis_summary(
     completed_count = 0
     failed_count = 0
     running_count = 0
+    queued_count = 0
 
     for source in iter_source_documents(
         normalized_data_source_id
@@ -981,17 +982,18 @@ def get_analysis_summary(
         elif status == "failed":
             failed_count += 1
 
-        elif status in {
-            "queued",
-            "running",
-        }:
+        elif status == "running":
             running_count += 1
+
+        elif status == "queued":
+            queued_count += 1
 
     pending_count = max(
         total_count
         - completed_count
         - failed_count
-        - running_count,
+        - running_count
+        - queued_count,
         0,
     )
 
@@ -1028,6 +1030,27 @@ def get_analysis_summary(
         reverse=True,
     )
 
+    latest_batch = (
+        values[0]
+        if values
+        else None
+    )
+
+    if latest_batch is not None:
+        latest_batch = {
+            **latest_batch,
+            "total_count":
+                total_count,
+            "completed_count":
+                completed_count,
+            "failed_count":
+                failed_count,
+            "running_count":
+                running_count,
+            "queued_count":
+                queued_count,
+        }
+
     return {
         "data_source_id":
             normalized_data_source_id,
@@ -1035,15 +1058,14 @@ def get_analysis_summary(
             total_count,
         "completed_count":
             completed_count,
+        "queued_count":
+            queued_count,
         "pending_count":
             pending_count,
         "running_count":
             running_count,
         "failed_count":
             failed_count,
-        "latest_batch": (
-            values[0]
-            if values
-            else None
-        ),
+        "latest_batch":
+            latest_batch,
     }
