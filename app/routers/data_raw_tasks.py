@@ -890,7 +890,17 @@ def process_batch_item(
 
         return result
 
-    except Exception:
+    except Exception as error:
+        print(
+            "[DATA_RAW_ERROR] "
+            f"batch_id={batch_id}, "
+            f"source_type={source_type}, "
+            f"source_id={source_id}, "
+            f"error_type="
+            f"{type(error).__name__}, "
+            f"error={error}"
+        )
+
         transaction = db.transaction()
 
         update_batch_result(

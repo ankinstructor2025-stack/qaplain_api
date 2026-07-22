@@ -2,6 +2,7 @@ import uuid
 from pathlib import PurePosixPath
 
 from fastapi import HTTPException
+from google.cloud import firestore
 
 from app.core.firebase import (
     get_firestore_client,
@@ -23,6 +24,9 @@ from app.routers.data_raw_analysis_common import (
 SUPPORTED_FILE_TYPE_COLLECTION = (
     "supported_file_types"
 )
+DATA_SOURCE_COLLECTION = (
+    "data_sources"
+)
 UPLOADED_FILE_COLLECTION = (
     "uploaded_files"
 )
@@ -42,15 +46,15 @@ BATCH_WRITE_LIMIT = 400
 
 def validate_supported_extension(
     extension: str,
-) -> str:
+) -> tuple[str, str]:
     normalized_extension = (
         normalize_extension(extension)
     )
 
     if not normalized_extension:
-        raise HTTPException(
-            status_code=400,
-            detail="拡張子を確認できません。",
+        return (
+            "",
+            "extension_not_found",
         )
 
     document = (
@@ -65,26 +69,126 @@ def validate_supported_extension(
     )
 
     if not document.exists:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f".{normalized_extension}は"
-                "拡張子管理に登録されていません。"
-            ),
+        return (
+            normalized_extension,
+            "extension_not_registered",
         )
 
     data = document.to_dict() or {}
 
     if data.get("enabled", True) is False:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f".{normalized_extension}は"
-                "無効になっています。"
-            ),
+        return (
+            normalized_extension,
+            "extension_disabled",
         )
 
-    return normalized_extension
+    return (
+        normalized_extension,
+        "",
+    )
+
+
+def get_selected_file_extensions(
+    data_source_id: str,
+) -> set[str]:
+    normalized_data_source_id = (
+        normalize_text(data_source_id)
+    )
+
+    if not normalized_data_source_id:
+        return set()
+
+    document = (
+        get_firestore_client()
+        .collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .document(
+            normalized_data_source_id
+        )
+        .get()
+    )
+
+    if not document.exists:
+        return set()
+
+    data = document.to_dict() or {}
+
+    return {
+        normalize_extension(extension)
+        for extension in (
+            data.get(
+                "file_extensions",
+                [],
+            )
+            or []
+        )
+        if normalize_extension(extension)
+    }
+
+
+def skip_source_file(
+    *,
+    source: dict,
+    extension: str,
+    reason: str,
+    user: dict,
+) -> dict:
+    print(
+        "[DATA_RAW_SKIP] "
+        f"data_source_id="
+        f"{source.get('data_source_id', '')}, "
+        f"source_type="
+        f"{source.get('source_type', '')}, "
+        f"source_id="
+        f"{source.get('source_id', '')}, "
+        f"file_name="
+        f"{source.get('file_name', '')}, "
+        f"extension="
+        f"{extension or '(empty)'}, "
+        f"reason={reason}"
+    )
+
+    (
+        get_firestore_client()
+        .collection(
+            source["collection_name"]
+        )
+        .document(
+            source["source_id"]
+        )
+        .set({
+            "analysis_status":
+                "completed",
+            "analysis_result":
+                "skipped",
+            "analysis_skip_reason":
+                reason,
+            "analysis_extension":
+                extension,
+            "analysis_record_count":
+                0,
+            "analyzed_at":
+                now_iso(),
+            "analyzed_by":
+                user.get("email", ""),
+        }, merge=True)
+    )
+
+    return {
+        "status":
+            "skipped",
+        "source_type":
+            source["source_type"],
+        "source_id":
+            source["source_id"],
+        "extension":
+            extension,
+        "reason":
+            reason,
+        "record_count":
+            0,
+    }
 
 
 def get_source_file(
@@ -360,9 +464,33 @@ def process_source_file(
         source_id,
     )
 
-    extension = validate_supported_extension(
-        source["extension"]
+    extension, extension_reason = (
+        validate_supported_extension(
+            source["extension"]
+        )
     )
+
+    if extension_reason:
+        return skip_source_file(
+            source=source,
+            extension=extension,
+            reason=extension_reason,
+            user=user,
+        )
+
+    selected_extensions = (
+        get_selected_file_extensions(
+            source["data_source_id"]
+        )
+    )
+
+    if extension not in selected_extensions:
+        return skip_source_file(
+            source=source,
+            extension=extension,
+            reason="extension_not_selected",
+            user=user,
+        )
 
     content = download_source(source)
 
@@ -503,6 +631,12 @@ def process_source_file(
             document_id,
         "analysis_status":
             "completed",
+        "analysis_result":
+            "processed",
+        "analysis_skip_reason":
+            firestore.DELETE_FIELD,
+        "analysis_extension":
+            extension,
         "analysis_record_count":
             len(records),
         "analyzed_at":
