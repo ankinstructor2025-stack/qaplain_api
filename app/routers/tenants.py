@@ -57,6 +57,12 @@ class TenantRequest(BaseModel):
         le=10,
     )
 
+    task_max_attempts: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+    )
+
     openai_api_key: Optional[str] = None
 
     gemini_api_key: Optional[str] = None
@@ -512,6 +518,10 @@ def document_to_dict(
             "task_concurrency",
             1,
         ),
+        "task_max_attempts": data.get(
+            "task_max_attempts",
+            5,
+        ),
         "created_at": data.get(
             "created_at"
         ),
@@ -685,6 +695,10 @@ def create_tenant(
         request.task_concurrency
     )
 
+    task_max_attempts = (
+        request.task_max_attempts
+    )
+
     openai_api_key = normalize_api_key(
         request.openai_api_key
     )
@@ -711,6 +725,7 @@ def create_tenant(
         "start_date": start_date,
         "end_date": end_date,
         "task_concurrency": task_concurrency,
+        "task_max_attempts": task_max_attempts,
         OPENAI_API_KEY_FIELD:
             encrypt_api_key(
                 openai_api_key
@@ -807,6 +822,10 @@ def update_tenant(
         request.task_concurrency
     )
 
+    task_max_attempts = (
+        request.task_max_attempts
+    )
+
     openai_api_key = normalize_api_key(
         request.openai_api_key
     )
@@ -830,6 +849,7 @@ def update_tenant(
         "tenant_name": tenant_name,
         "end_date": end_date,
         "task_concurrency": task_concurrency,
+        "task_max_attempts": task_max_attempts,
         OPENAI_API_KEY_FIELD:
             encrypt_api_key(
                 openai_api_key
