@@ -69,13 +69,9 @@ def get_data_raw_worker_url() -> str:
             ),
         )
 
-    base_url = (
+    return (
         f"{parsed.scheme}://"
         f"{parsed.netloc}"
-    )
-
-    return (
-        f"{base_url}"
         "/data-raw/tasks/worker"
     )
 

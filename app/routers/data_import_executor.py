@@ -1,11 +1,14 @@
 import json
 import uuid
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 
 from app.core.cloud_tasks import (
+    CLOUD_TASKS_AUDIENCE,
+    CLOUD_TASKS_WORKER_URL,
     create_http_task,
     ensure_task_queue,
     normalize_task_concurrency,
@@ -26,6 +29,40 @@ from app.routers.data_import_common import (
     save_json_item,
     save_raw_response,
 )
+
+
+def get_data_import_worker_url() -> str:
+    configured_url = normalize_text(
+        CLOUD_TASKS_WORKER_URL
+    )
+
+    if not configured_url:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "CLOUD_TASKS_WORKER_URLが"
+                "設定されていません。"
+            ),
+        )
+
+    parsed = urlsplit(
+        configured_url
+    )
+
+    if not parsed.scheme or not parsed.netloc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "CLOUD_TASKS_WORKER_URLの"
+                "形式が正しくありません。"
+            ),
+        )
+
+    return (
+        f"{parsed.scheme}://"
+        f"{parsed.netloc}"
+        "/data-import/tasks/worker"
+    )
 
 
 def build_auth_headers(data_source: dict) -> dict[str, str]:
@@ -369,8 +406,19 @@ def get_import_task(task_id: str) -> dict:
 def submit_task(queue_config: dict, task_data: dict) -> None:
     try:
         response = create_http_task(
-            queue_full_name=queue_config["queue_full_name"],
-            payload={"task_id": task_data["task_id"]},
+            queue_full_name=
+                queue_config["queue_full_name"],
+            payload={
+                "task_id":
+                    task_data["task_id"],
+            },
+            worker_url=
+                get_data_import_worker_url(),
+            audience=
+                normalize_text(
+                    CLOUD_TASKS_AUDIENCE
+                    or CLOUD_TASKS_WORKER_URL
+                ),
         )
     except Exception as error:
         update_import_task(
