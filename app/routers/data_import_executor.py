@@ -9,6 +9,7 @@ from app.core.cloud_tasks import (
     create_http_task,
     ensure_task_queue,
     normalize_task_concurrency,
+    normalize_task_max_attempts,
 )
 from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
@@ -269,10 +270,18 @@ def get_tenant_task_queue_config(data_source: dict) -> dict:
         tenant_data.get("task_concurrency", 1)
     )
 
+    task_max_attempts = normalize_task_max_attempts(
+        tenant_data.get(
+            "task_max_attempts",
+            5,
+        )
+    )
+
     try:
         queue_config = ensure_task_queue(
             identifier=tenant_id,
             concurrency=task_concurrency,
+            max_attempts=task_max_attempts,
         )
     except Exception as error:
         print(f"Cloud Tasks queue setup error: {type(error).__name__}: {error}")
@@ -290,6 +299,7 @@ def create_import_task_document(
     user: dict,
     queue_id: str,
     task_concurrency: int,
+    task_max_attempts: int,
     batch_id: str,
     task_type: str,
     payload: dict | None = None,
@@ -314,6 +324,7 @@ def create_import_task_document(
         ) or "raw",
         "queue_id": queue_id,
         "task_concurrency": task_concurrency,
+        "task_max_attempts": task_max_attempts,
         "status": "queued",
         "result_item_id": None,
         "result_item_count": 0,
@@ -483,6 +494,7 @@ def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
         user=user,
         queue_id=queue_config["queue_id"],
         task_concurrency=queue_config["task_concurrency"],
+        task_max_attempts=queue_config["task_max_attempts"],
         batch_id=batch_id,
         task_type="fetch_root",
     )
@@ -504,6 +516,7 @@ def enqueue_import_task(*, data_source: dict, user: dict) -> dict:
         "tenant_id": queue_config["tenant_id"],
         "queue_id": queue_config["queue_id"],
         "task_concurrency": queue_config["task_concurrency"],
+        "task_max_attempts": queue_config["task_max_attempts"],
         "status": "queued",
         "reset_result": reset_result,
     }
@@ -524,6 +537,7 @@ def create_child_task(
         user=user,
         queue_id=queue_config["queue_id"],
         task_concurrency=queue_config["task_concurrency"],
+        task_max_attempts=queue_config["task_max_attempts"],
         batch_id=batch_id,
         task_type=task_type,
         payload=payload,
