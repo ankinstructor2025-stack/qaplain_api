@@ -45,6 +45,9 @@ DEFAULT_QUEUE_PREFIX = os.getenv(
 MIN_TASK_CONCURRENCY = 1
 MAX_TASK_CONCURRENCY = 10
 
+MIN_TASK_MAX_ATTEMPTS = 1
+MAX_TASK_MAX_ATTEMPTS = 100
+
 
 def normalize_text(value: Any) -> str:
     return str(value or "").strip()
@@ -63,6 +66,21 @@ def normalize_task_concurrency(value: Any) -> int:
     return max(
         MIN_TASK_CONCURRENCY,
         min(concurrency, MAX_TASK_CONCURRENCY),
+    )
+
+
+def normalize_task_max_attempts(value: Any) -> int:
+    try:
+        max_attempts = int(value)
+    except (TypeError, ValueError):
+        max_attempts = 5
+
+    return max(
+        MIN_TASK_MAX_ATTEMPTS,
+        min(
+            max_attempts,
+            MAX_TASK_MAX_ATTEMPTS,
+        ),
     )
 
 
@@ -140,6 +158,7 @@ def ensure_task_queue(
     *,
     identifier: str,
     concurrency: int,
+    max_attempts: int = 5,
     prefix: str = DEFAULT_QUEUE_PREFIX,
 ) -> dict:
     if not CLOUD_TASKS_PROJECT:
@@ -150,6 +169,13 @@ def ensure_task_queue(
     normalized_concurrency = (
         normalize_task_concurrency(concurrency)
     )
+
+    normalized_max_attempts = (
+        normalize_task_max_attempts(
+            max_attempts
+        )
+    )
+
     queue_id = build_task_queue_id(
         identifier=identifier,
         prefix=prefix,
@@ -180,6 +206,11 @@ def ensure_task_queue(
             ),
             max_dispatches_per_second=float(
                 normalized_concurrency
+            ),
+        ),
+        retry_config=tasks_v2.RetryConfig(
+            max_attempts=(
+                normalized_max_attempts
             ),
         ),
     )
@@ -216,6 +247,10 @@ def ensure_task_queue(
                         "rate_limits."
                         "max_dispatches_per_second"
                     ),
+                    (
+                        "retry_config."
+                        "max_attempts"
+                    ),
                 ]
             ),
         }
@@ -225,6 +260,8 @@ def ensure_task_queue(
         "queue_id": queue_id,
         "queue_full_name": updated_queue.name,
         "task_concurrency": normalized_concurrency,
+        "task_max_attempts":
+            normalized_max_attempts,
     }
 
 
