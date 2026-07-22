@@ -162,6 +162,16 @@ def validate_data_source_request(
                 detail="接続先URLを入力してください。"
             )
 
+        if (
+            validate_processing_pattern(
+                request.processing_pattern
+            )
+            == "file_links"
+        ):
+            validate_file_extensions(
+                request.file_extensions
+            )
+
         validate_authentication(
             request=request,
             is_update=is_update
@@ -410,11 +420,23 @@ def create_parent_data(
             method_key
         )
 
-        data["file_extensions"] = (
-            firestore.DELETE_FIELD
-            if is_update
-            else []
-        )
+        if (
+            validate_processing_pattern(
+                request.processing_pattern
+            )
+            == "file_links"
+        ):
+            data["file_extensions"] = (
+                validate_file_extensions(
+                    request.file_extensions
+                )
+            )
+        else:
+            data["file_extensions"] = (
+                firestore.DELETE_FIELD
+                if is_update
+                else []
+            )
 
         if is_update:
             data["retrieval_type"] = (
