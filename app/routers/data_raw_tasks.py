@@ -72,7 +72,7 @@ def get_data_raw_worker_url() -> str:
 
     return (
         f"{base_url}"
-        "/v1/data-raw/tasks/worker"
+        "/data-raw/tasks/worker"
     )
 
 
