@@ -7,8 +7,8 @@ from fastapi.responses import StreamingResponse
 
 from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
-    DATA_IMPORT_COLLECTION,
     authenticate_user,
+    get_data_import_collection,
     get_storage_bucket,
     normalize_text,
     serialize_value,
@@ -40,8 +40,18 @@ DATA_SOURCE_COLLECTION = "data_sources"
 PARENT_DISPLAY_FIELD_COLLECTION = "parent_display_fields"
 
 
-def get_item_document(item_id: str):
+def get_item_document(
+    data_source_id: str,
+    item_id: str,
+):
+    normalized_data_source_id = normalize_text(data_source_id)
     normalized_item_id = normalize_text(item_id)
+
+    if not normalized_data_source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="データソースIDが指定されていません。",
+        )
 
     if not normalized_item_id:
         raise HTTPException(
@@ -50,8 +60,9 @@ def get_item_document(item_id: str):
         )
 
     document = (
-        get_firestore_client()
-        .collection(DATA_IMPORT_COLLECTION)
+        get_data_import_collection(
+            normalized_data_source_id
+        )
         .document(normalized_item_id)
         .get()
     )
@@ -242,12 +253,8 @@ def list_items(
     normalized_data_source_id = normalize_text(data_source_id)
 
     documents = (
-        get_firestore_client()
-        .collection(DATA_IMPORT_COLLECTION)
-        .where(
-            "data_source_id",
-            "==",
-            normalized_data_source_id,
+        get_data_import_collection(
+            normalized_data_source_id
         )
         .stream()
     )
@@ -467,10 +474,14 @@ def build_parent_display_values(
 @router.get("/items/{item_id}")
 def get_item(
     item_id: str,
+    data_source_id: str = Query(..., min_length=1),
     authorization: str = Header(...),
 ):
     authenticate_user(authorization)
-    document = get_item_document(item_id)
+    document = get_item_document(
+        data_source_id=data_source_id,
+        item_id=item_id,
+    )
     item = document.to_dict() or {}
     content, content_type = read_storage_content(item)
 
@@ -512,10 +523,14 @@ def get_item(
 @router.get("/items/{item_id}/download")
 def download_item(
     item_id: str,
+    data_source_id: str = Query(..., min_length=1),
     authorization: str = Header(...),
 ):
     authenticate_user(authorization)
-    document = get_item_document(item_id)
+    document = get_item_document(
+        data_source_id=data_source_id,
+        item_id=item_id,
+    )
     item = document.to_dict() or {}
     content, content_type = read_storage_content(item)
 
