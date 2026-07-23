@@ -20,7 +20,6 @@ from app.routers.data_import_common import (
     now_iso,
 )
 from app.routers.data_raw_processor import (
-    RAW_DOCUMENT_COLLECTION,
     process_source_file,
 )
 
@@ -35,6 +34,7 @@ DATA_RAW_QUEUE_PREFIX = os.getenv(
 )
 
 DATA_SOURCE_COLLECTION = "data_sources"
+DATA_IMPORT_COLLECTION = "data_import"
 TENANT_COLLECTION = "tenants"
 
 DEFAULT_TASK_CONCURRENCY = 1
@@ -409,7 +409,7 @@ def reset_analysis_state(
 
     reset_source_count = 0
 
-    for source in iter_source_documents(
+    for source in iter_import_documents(
         normalized_data_source_id
     ):
         source_reference = source["reference"]
@@ -428,6 +428,14 @@ def reset_analysis_state(
             "analysis_started_at":
                 firestore.DELETE_FIELD,
             "analysis_completed_at":
+                firestore.DELETE_FIELD,
+            "analysis_record_count":
+                firestore.DELETE_FIELD,
+            "raw_document_id":
+                firestore.DELETE_FIELD,
+            "analyzed_at":
+                firestore.DELETE_FIELD,
+            "analyzed_by":
                 firestore.DELETE_FIELD,
             "updated_at":
                 now_iso(),
@@ -486,7 +494,7 @@ def reset_analysis_state(
     }
 
 
-def iter_source_documents(
+def iter_import_documents(
     data_source_id: str,
 ):
     normalized_data_source_id = (
@@ -507,7 +515,7 @@ def iter_source_documents(
             normalized_data_source_id
         )
         .collection(
-            RAW_DOCUMENT_COLLECTION
+            DATA_IMPORT_COLLECTION
         )
         .stream()
     )
@@ -524,22 +532,11 @@ def iter_source_documents(
         ):
             continue
 
-        source_type = normalize_text(
-            data.get("source_type")
-        )
         source_id = normalize_text(
-            data.get("source_id")
-        )
-
-        if not source_type:
-            source_type = "raw_document"
-
-        if not source_id:
-            source_id = document.id
+            data.get("item_id")
+        ) or document.id
 
         yield {
-            "source_type":
-                source_type,
             "source_id":
                 source_id,
             "document_id":
@@ -622,7 +619,7 @@ def dispatch_batch(
     }, merge=True)
 
     sources = list(
-        iter_source_documents(
+        iter_import_documents(
             data_source_id
         )
     )
@@ -683,10 +680,8 @@ def dispatch_batch(
                         "data_raw_process",
                     "batch_id":
                         batch_id,
-                    "source_type":
-                        source[
-                            "source_type"
-                        ],
+                    "data_source_id":
+                        data_source_id,
                     "source_id":
                         source[
                             "source_id"
@@ -846,7 +841,7 @@ def update_batch_result(
 def process_batch_item(
     *,
     batch_id: str,
-    source_type: str,
+    data_source_id: str,
     source_id: str,
 ) -> dict:
     db = get_firestore_client()
@@ -858,10 +853,25 @@ def process_batch_item(
         .document(batch_id)
     )
 
+    source_reference = (
+        db.collection(DATA_SOURCE_COLLECTION)
+        .document(data_source_id)
+        .collection(DATA_IMPORT_COLLECTION)
+        .document(source_id)
+    )
+
+    source_reference.set({
+        "analysis_status": "running",
+        "analysis_started_at": now_iso(),
+        "analysis_error": firestore.DELETE_FIELD,
+        "analysis_error_message": firestore.DELETE_FIELD,
+        "updated_at": now_iso(),
+    }, merge=True)
+
     try:
         result = process_source_file(
-            source_type=
-                source_type,
+            data_source_id=
+                data_source_id,
             source_id=
                 source_id,
             overwrite=
@@ -886,12 +896,19 @@ def process_batch_item(
         print(
             "[DATA_RAW_ERROR] "
             f"batch_id={batch_id}, "
-            f"source_type={source_type}, "
             f"source_id={source_id}, "
             f"error_type="
             f"{type(error).__name__}, "
             f"error={error}"
         )
+
+        source_reference.set({
+            "analysis_status": "failed",
+            "analysis_error": type(error).__name__,
+            "analysis_error_message": str(error),
+            "analysis_completed_at": now_iso(),
+            "updated_at": now_iso(),
+        }, merge=True)
 
         transaction = db.transaction()
 
@@ -927,8 +944,8 @@ def execute_data_raw_worker(
         return process_batch_item(
             batch_id=
                 request.batch_id,
-            source_type=
-                request.source_type,
+            data_source_id=
+                request.data_source_id,
             source_id=
                 request.source_id,
         )
@@ -957,7 +974,7 @@ def get_analysis_summary(
     running_count = 0
     queued_count = 0
 
-    for source in iter_source_documents(
+    for source in iter_import_documents(
         normalized_data_source_id
     ):
         total_count += 1

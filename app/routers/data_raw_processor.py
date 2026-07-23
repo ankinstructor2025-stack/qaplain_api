@@ -27,8 +27,7 @@ from app.routers.data_import_common import (
 
 
 SUPPORTED_FILE_TYPE_COLLECTION = "supported_file_types"
-UPLOADED_FILE_COLLECTION = "uploaded_files"
-DATA_IMPORT_COLLECTION = "data_import_items"
+DATA_IMPORT_COLLECTION = "data_import"
 DATA_SOURCE_COLLECTION = "data_sources"
 
 RAW_DOCUMENT_COLLECTION = "raw_documents"
@@ -1043,42 +1042,36 @@ def validate_supported_extension(
 
 
 def get_source_file(
-    source_type: str,
+    data_source_id: str,
     source_id: str,
 ) -> dict:
-    normalized_source_type = (
-        normalize_text(source_type)
+    normalized_data_source_id = normalize_text(
+        data_source_id
     )
-    normalized_source_id = (
-        normalize_text(source_id)
-    )
-
-    collection_map = {
-        "uploaded_file":
-            UPLOADED_FILE_COLLECTION,
-        "api_import":
-            DATA_IMPORT_COLLECTION,
-    }
-
-    collection_name = collection_map.get(
-        normalized_source_type
+    normalized_source_id = normalize_text(
+        source_id
     )
 
-    if not collection_name:
+    if not normalized_data_source_id:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "source_typeはuploaded_file"
-                "またはapi_importを指定してください。"
-            ),
+            detail="データソースIDが指定されていません。",
         )
 
-    document = (
+    if not normalized_source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="解析対象IDが指定されていません。",
+        )
+
+    reference = (
         get_firestore_client()
-        .collection(collection_name)
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(normalized_data_source_id)
+        .collection(DATA_IMPORT_COLLECTION)
         .document(normalized_source_id)
-        .get()
     )
+    document = reference.get()
 
     if not document.exists:
         raise HTTPException(
@@ -1094,81 +1087,44 @@ def get_source_file(
             detail="削除済みのファイルです。",
         )
 
-    gcs_path = normalize_text(
-        data.get("gcs_path")
-    )
-
-    extension = normalize_extension(
-        data.get("extension")
-    )
+    gcs_path = normalize_text(data.get("gcs_path"))
+    extension = normalize_extension(data.get("extension"))
 
     if not extension:
-        file_name = normalize_text(
-            data.get("file_name")
-        )
-
+        file_name = normalize_text(data.get("file_name"))
         if "." in file_name:
             extension = normalize_extension(
-                PurePosixPath(
-                    file_name
-                ).suffix
+                PurePosixPath(file_name).suffix
             )
 
     if not gcs_path:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Cloud Storageの保存先が"
-                "登録されていません。"
-            ),
+            detail="Cloud Storageの保存先が登録されていません。",
         )
 
     return {
-        "source_type":
-            normalized_source_type,
-        "source_id":
-            normalized_source_id,
-        "collection_name":
-            collection_name,
-        "data_source_id":
-            normalize_text(
-                data.get(
-                    "data_source_id"
-                )
-            ),
-        "data_source_name":
-            normalize_text(
-                data.get(
-                    "data_source_name"
-                )
-            ),
-        "tenant_id":
-            normalize_text(
-                data.get("tenant_id")
-            ),
-        "file_name":
-            normalize_text(
-                data.get("file_name")
-            )
-            or PurePosixPath(
-                gcs_path
-            ).name,
-        "content_type":
-            normalize_text(
-                data.get("content_type")
-            ),
-        "extension":
-            extension,
-        "bucket_name":
-            normalize_text(
-                data.get("bucket_name")
-            ),
-        "gcs_path":
-            gcs_path,
-        "gcs_uri":
-            normalize_text(
-                data.get("gcs_uri")
-            ),
+        "source_type": "data_import",
+        "source_id": normalized_source_id,
+        "source_reference": reference,
+        "data_source_id": normalized_data_source_id,
+        "data_source_name": normalize_text(
+            data.get("data_source_name")
+        ),
+        "tenant_id": normalize_text(data.get("tenant_id")),
+        "file_name": (
+            normalize_text(data.get("file_name"))
+            or PurePosixPath(gcs_path).name
+        ),
+        "content_type": normalize_text(
+            data.get("content_type")
+        ),
+        "extension": extension,
+        "bucket_name": normalize_text(
+            data.get("bucket_name")
+        ),
+        "gcs_path": gcs_path,
+        "gcs_uri": normalize_text(data.get("gcs_uri")),
     }
 
 
@@ -1330,13 +1286,13 @@ def _write_records(
 
 def process_source_file(
     *,
-    source_type: str,
+    data_source_id: str,
     source_id: str,
     user: dict,
     overwrite: bool = True,
 ) -> dict:
     source = get_source_file(
-        source_type,
+        data_source_id,
         source_id,
     )
 
@@ -1462,14 +1418,7 @@ def process_source_file(
 
         raise
 
-    source_reference = (
-        db.collection(
-            source["collection_name"]
-        )
-        .document(
-            source["source_id"]
-        )
-    )
+    source_reference = source["source_reference"]
 
     source_reference.set({
         "raw_document_id":
@@ -1479,6 +1428,8 @@ def process_source_file(
         "analysis_record_count":
             len(records),
         "analyzed_at":
+            now_iso(),
+        "analysis_completed_at":
             now_iso(),
         "analyzed_by":
             user.get("email", ""),

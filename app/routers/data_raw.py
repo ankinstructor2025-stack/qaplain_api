@@ -34,7 +34,7 @@ router = APIRouter(
 class DataRawProcessRequest(
     BaseModel
 ):
-    source_type: str = Field(
+    data_source_id: str = Field(
         min_length=1,
     )
 
@@ -64,7 +64,7 @@ class DataRawWorkerRequest(
         min_length=1,
     )
 
-    source_type: str = ""
+    data_source_id: str = ""
 
     source_id: str = ""
 
@@ -82,8 +82,8 @@ def process_data_raw(
     )
 
     return process_source_file(
-        source_type=
-            request.source_type,
+        data_source_id=
+            request.data_source_id,
         source_id=
             request.source_id,
         overwrite=
