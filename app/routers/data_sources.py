@@ -384,6 +384,14 @@ def create_parent_data(
         "file",
         "mail"
     ):
+        if is_update:
+            delete_connection_fields(data)
+
+            if source_type == "mail":
+                data["authentication_method_key"] = (
+                    firestore.DELETE_FIELD
+                )
+
         if source_type == "file":
             data["file_extensions"] = (
                 validate_file_extensions(
@@ -398,14 +406,6 @@ def create_parent_data(
                     if normalize_file_extension(extension)
                 )
             )
-
-        if is_update:
-            delete_connection_fields(data)
-
-            if source_type == "mail":
-                data["authentication_method_key"] = (
-                    firestore.DELETE_FIELD
-                )
 
     if source_type in (
         "url",
