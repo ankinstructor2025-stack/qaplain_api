@@ -13,8 +13,8 @@ from app.routers.data_import_common import (
     serialize_value,
 )
 from app.routers.data_raw_processor import (
-    RAW_DOCUMENT_COLLECTION,
     RAW_RECORD_SUBCOLLECTION,
+    get_raw_document_reference,
     process_source_file,
 )
 from app.routers.data_raw_tasks import (
@@ -174,20 +174,21 @@ def execute_worker(
 )
 def get_data_raw_document(
     document_id: str,
+    data_source_id: str = Query(
+        ...,
+        min_length=1,
+    ),
     authorization: str = Header(...),
 ):
     authenticate_user(
         authorization
     )
 
-    document = (
-        get_firestore_client()
-        .collection(
-            RAW_DOCUMENT_COLLECTION
-        )
-        .document(document_id)
-        .get()
-    )
+    document = get_raw_document_reference(
+        get_firestore_client(),
+        data_source_id,
+        document_id,
+    ).get()
 
     if not document.exists:
         from fastapi import HTTPException
@@ -217,6 +218,10 @@ def get_data_raw_document(
 )
 def get_data_raw_records(
     document_id: str,
+    data_source_id: str = Query(
+        ...,
+        min_length=1,
+    ),
     limit: int = Query(
         100,
         ge=1,
@@ -228,12 +233,10 @@ def get_data_raw_records(
         authorization
     )
 
-    document_reference = (
-        get_firestore_client()
-        .collection(
-            RAW_DOCUMENT_COLLECTION
-        )
-        .document(document_id)
+    document_reference = get_raw_document_reference(
+        get_firestore_client(),
+        data_source_id,
+        document_id,
     )
 
     documents = (
