@@ -5,7 +5,6 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile
 from firebase_admin import firestore
 
-from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
     BUCKET_NAME,
     get_data_import_collection,
@@ -15,7 +14,6 @@ from app.routers.data_import_common import (
     normalize_text,
 )
 
-FILE_TYPE_COLLECTION = "file_types"
 
 
 def get_file_extension(file_name: str) -> str:
@@ -38,46 +36,24 @@ def sanitize_file_name(file_name: str) -> str:
     return normalized
 
 
-def is_enabled_file_type(data: dict) -> bool:
-    if data.get("deleted", False):
-        return False
+def get_allowed_extensions(data_source: dict) -> list[str]:
+    source_extensions = data_source.get("file_extensions", [])
 
-    if "enabled" in data:
-        return bool(data.get("enabled"))
-
-    status = normalize_text(
-        data.get("status", "active")
-    ).lower()
-
-    return status not in {
-        "disabled",
-        "inactive",
-        "invalid",
-        "無効",
-    }
-
-
-def get_allowed_extensions() -> list[str]:
-    documents = (
-        get_firestore_client()
-        .collection(FILE_TYPE_COLLECTION)
-        .stream()
-    )
+    if not isinstance(source_extensions, list):
+        return []
 
     extensions: list[str] = []
 
-    for document in documents:
-        data = document.to_dict() or {}
-
-        if not is_enabled_file_type(data):
-            continue
-
-        extension = normalize_extension(
-            data.get("extension")
-            or data.get("file_extension")
-            or data.get("value")
-            or document.id
-        )
+    for item in source_extensions:
+        if isinstance(item, str):
+            extension = normalize_extension(item)
+        elif isinstance(item, dict):
+            extension = normalize_extension(
+                item.get("extension")
+                or item.get("value")
+            )
+        else:
+            extension = ""
 
         if extension and extension not in extensions:
             extensions.append(extension)
@@ -85,7 +61,10 @@ def get_allowed_extensions() -> list[str]:
     return sorted(extensions)
 
 
-def validate_file_extension(file_name: str) -> str:
+def validate_file_extension(
+    file_name: str,
+    data_source: dict,
+) -> str:
     extension = get_file_extension(file_name)
 
     if not extension:
@@ -94,12 +73,12 @@ def validate_file_extension(file_name: str) -> str:
             detail="拡張子のないファイルは取り込めません。",
         )
 
-    allowed_extensions = get_allowed_extensions()
+    allowed_extensions = get_allowed_extensions(data_source)
 
     if not allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail="有効な拡張子が登録されていません。",
+            detail="データソースに対象拡張子が設定されていません。",
         )
 
     if extension not in allowed_extensions:
@@ -117,7 +96,6 @@ def validate_file_extension(file_name: str) -> str:
         )
 
     return extension
-
 
 def build_gcs_path(
     data_source_id: str,
@@ -281,7 +259,10 @@ def execute_file_upload(
     file_name = sanitize_file_name(
         upload_file.filename or ""
     )
-    extension = validate_file_extension(file_name)
+    extension = validate_file_extension(
+        file_name,
+        data_source,
+    )
     existing_document = find_same_name_file(
         data_source["data_source_id"],
         file_name,
