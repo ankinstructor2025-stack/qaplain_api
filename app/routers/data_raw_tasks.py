@@ -20,8 +20,7 @@ from app.routers.data_import_common import (
     now_iso,
 )
 from app.routers.data_raw_processor import (
-    DATA_IMPORT_COLLECTION,
-    UPLOADED_FILE_COLLECTION,
+    RAW_DOCUMENT_COLLECTION,
     process_source_file,
 )
 
@@ -413,14 +412,7 @@ def reset_analysis_state(
     for source in iter_source_documents(
         normalized_data_source_id
     ):
-        source_reference = (
-            db.collection(
-                source["collection_name"]
-            )
-            .document(
-                source["source_id"]
-            )
-        )
+        source_reference = source["reference"]
 
         source_reference.set({
             "analysis_status":
@@ -497,58 +489,66 @@ def reset_analysis_state(
 def iter_source_documents(
     data_source_id: str,
 ):
-    db = get_firestore_client()
-
-    definitions = (
-        (
-            "uploaded_file",
-            UPLOADED_FILE_COLLECTION,
-        ),
-        (
-            "api_import",
-            DATA_IMPORT_COLLECTION,
-        ),
+    normalized_data_source_id = (
+        normalize_text(
+            data_source_id
+        )
     )
 
-    for (
-        source_type,
-        collection_name,
-    ) in definitions:
+    if not normalized_data_source_id:
+        return
 
-        documents = (
-            db.collection(
-                collection_name
-            )
-            .where(
-                "data_source_id",
-                "==",
-                data_source_id,
-            )
-            .stream()
+    documents = (
+        get_firestore_client()
+        .collection(
+            DATA_SOURCE_COLLECTION
+        )
+        .document(
+            normalized_data_source_id
+        )
+        .collection(
+            RAW_DOCUMENT_COLLECTION
+        )
+        .stream()
+    )
+
+    for document in documents:
+        data = (
+            document.to_dict()
+            or {}
         )
 
-        for document in documents:
-            data = (
-                document.to_dict()
-                or {}
-            )
+        if data.get(
+            "deleted",
+            False,
+        ):
+            continue
 
-            if data.get(
-                "deleted",
-                False,
-            ):
-                continue
+        source_type = normalize_text(
+            data.get("source_type")
+        )
+        source_id = normalize_text(
+            data.get("source_id")
+        )
 
-            yield {
-                "source_type":
-                    source_type,
-                "source_id":
-                    document.id,
-                "collection_name":
-                    collection_name,
-                "data":
-                    data,
-            }
+        if not source_type:
+            source_type = "raw_document"
+
+        if not source_id:
+            source_id = document.id
+
+        yield {
+            "source_type":
+                source_type,
+            "source_id":
+                source_id,
+            "document_id":
+                document.id,
+            "reference":
+                document.reference,
+            "data":
+                data,
+        }
 
 
 def dispatch_batch(
@@ -696,24 +696,16 @@ def dispatch_batch(
 
             queued_count += 1
 
-            (
-                db.collection(
-                    source["collection_name"]
-                )
-                .document(
-                    source["source_id"]
-                )
-                .set({
-                    "analysis_status":
-                        "queued",
-                    "analysis_batch_id":
-                        batch_id,
-                    "analysis_task_name":
-                        task.name,
-                    "updated_at":
-                        now_iso(),
-                }, merge=True)
-            )
+            source["reference"].set({
+                "analysis_status":
+                    "queued",
+                "analysis_batch_id":
+                    batch_id,
+                "analysis_task_name":
+                    task.name,
+                "updated_at":
+                    now_iso(),
+            }, merge=True)
 
         except Exception as error:
             enqueue_failed_count += 1
