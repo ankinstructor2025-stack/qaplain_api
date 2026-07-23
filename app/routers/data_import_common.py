@@ -13,8 +13,7 @@ from app.core.firebase import get_firestore_client, verify_id_token
 BUCKET_NAME = os.getenv("UPLOAD_BUCKET", "qaplain")
 DATA_SOURCE_COLLECTION = "data_sources"
 PARAMETER_COLLECTION = "parameters"
-UPLOADED_FILE_COLLECTION = "uploaded_files"
-DATA_IMPORT_COLLECTION = "data_import_items"
+DATA_IMPORT_COLLECTION = "data_import"
 DATA_IMPORT_TASK_COLLECTION = "data_import_tasks"
 TENANT_COLLECTION = "tenants"
 
@@ -150,6 +149,23 @@ def get_data_source(data_source_id: str) -> dict:
         "enabled": data.get("enabled", True),
     }
 
+
+
+
+def get_data_import_collection(data_source_id: str):
+    normalized_id = normalize_text(data_source_id)
+    if not normalized_id:
+        raise HTTPException(
+            status_code=400,
+            detail="データソースIDが指定されていません。",
+        )
+
+    return (
+        get_firestore_client()
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(normalized_id)
+        .collection(DATA_IMPORT_COLLECTION)
+    )
 
 def validate_common_data_source(data_source: dict, expected_method_key: str) -> None:
     if not data_source.get("enabled", True):
@@ -367,7 +383,7 @@ def save_raw_response(
     }
 
     try:
-        get_firestore_client().collection(DATA_IMPORT_COLLECTION).document(item_id).set(data)
+        get_data_import_collection(data_source["data_source_id"]).document(item_id).set(data)
     except Exception as error:
         delete_from_storage(gcs_path)
         print(f"Firestore registration error: {type(error).__name__}: {error}")
@@ -426,7 +442,7 @@ def save_json_item(
     }
 
     try:
-        get_firestore_client().collection(DATA_IMPORT_COLLECTION).document(item_id).set(data)
+        get_data_import_collection(data_source["data_source_id"]).document(item_id).set(data)
     except Exception as error:
         delete_from_storage(gcs_path)
         print(f"Firestore registration error: {type(error).__name__}: {error}")
@@ -496,7 +512,7 @@ def save_downloaded_file(
     }
 
     try:
-        get_firestore_client().collection(DATA_IMPORT_COLLECTION).document(item_id).set(data)
+        get_data_import_collection(data_source["data_source_id"]).document(item_id).set(data)
     except Exception as error:
         delete_from_storage(gcs_path)
         print(f"Firestore registration error: {type(error).__name__}: {error}")

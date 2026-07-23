@@ -21,6 +21,7 @@ from app.routers.data_import_common import (
     TENANT_COLLECTION,
     build_requested_url,
     get_content_extension,
+    get_data_import_collection,
     get_storage_bucket,
     normalize_content_type,
     normalize_extension,
@@ -457,6 +458,30 @@ def get_active_import_tasks(data_source_id: str) -> list[dict]:
     ]
 
 
+def delete_import_documents(
+    data_source_id: str,
+) -> int:
+    documents = list(
+        get_data_import_collection(
+            data_source_id
+        ).stream()
+    )
+
+    deleted_count = 0
+    for offset in range(0, len(documents), 400):
+        batch = get_firestore_client().batch()
+        chunk = documents[offset:offset + 400]
+
+        for document in chunk:
+            batch.delete(document.reference)
+
+        if chunk:
+            batch.commit()
+            deleted_count += len(chunk)
+
+    return deleted_count
+
+
 def delete_documents_by_data_source(
     collection_name: str,
     data_source_id: str,
@@ -519,9 +544,8 @@ def reset_import_data(data_source: dict) -> dict:
         )
 
     deleted_storage_count = delete_storage_by_data_source(data_source_id)
-    deleted_item_count = delete_documents_by_data_source(
-        DATA_IMPORT_COLLECTION,
-        data_source_id,
+    deleted_item_count = delete_import_documents(
+        data_source_id
     )
     deleted_task_count = delete_documents_by_data_source(
         DATA_IMPORT_TASK_COLLECTION,

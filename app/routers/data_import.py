@@ -16,8 +16,8 @@ from app.core.firebase import get_firestore_client
 from app.routers.data_import_common import (
     DATA_IMPORT_COLLECTION,
     DATA_IMPORT_TASK_COLLECTION,
-    UPLOADED_FILE_COLLECTION,
     authenticate_user,
+    get_data_import_collection,
     get_data_source,
     normalize_key,
     normalize_text,
@@ -634,64 +634,6 @@ def get_tasks(
 
 
 @router.get(
-    "/uploaded-files"
-)
-def get_uploaded_files(
-    authorization: str = Header(...),
-):
-    authenticate_user(
-        authorization
-    )
-
-    documents = (
-        get_firestore_client()
-        .collection(
-            UPLOADED_FILE_COLLECTION
-        )
-        .stream()
-    )
-
-    uploaded_files = []
-
-    for document in documents:
-        data = document.to_dict() or {}
-
-        if data.get(
-            "deleted",
-            False,
-        ):
-            continue
-
-        uploaded_files.append(
-            serialize_uploaded_file(
-                document
-            )
-        )
-
-    uploaded_files.sort(
-        key=lambda item:
-            item.get(
-                "updated_at"
-            )
-            or item.get(
-                "created_at"
-            )
-            or "",
-        reverse=True,
-    )
-
-    return {
-        "uploaded_files":
-            uploaded_files,
-
-        "count":
-            len(
-                uploaded_files
-            ),
-    }
-
-
-@router.get(
     "/items"
 )
 def get_imports(
@@ -712,16 +654,9 @@ def get_imports(
     )
 
     documents = (
-        get_firestore_client()
-        .collection(
-            DATA_IMPORT_COLLECTION
-        )
-        .where(
-            "data_source_id",
-            "==",
-            normalized_data_source_id,
-        )
-        .stream()
+        get_data_import_collection(
+            normalized_data_source_id
+        ).stream()
     )
 
     imports = []
