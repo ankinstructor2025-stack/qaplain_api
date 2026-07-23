@@ -173,6 +173,7 @@ def serialize_import(
     status_code=201,
 )
 async def import_file_upload(
+    data_source_id: str = Form(...),
     overwrite: bool = Form(False),
     file: UploadFile = File(...),
     authorization: str = Header(...),
@@ -182,6 +183,7 @@ async def import_file_upload(
     )
 
     return execute_file_upload(
+        data_source_id=data_source_id,
         upload_file=file,
         overwrite=overwrite,
         user=user,
@@ -637,16 +639,21 @@ def get_tasks(
     "/uploaded-files"
 )
 def get_uploaded_files(
+    data_source_id: str = Query(
+        ...,
+        min_length=1,
+    ),
     authorization: str = Header(...),
 ):
-    authenticate_user(
-        authorization
+    authenticate_user(authorization)
+
+    normalized_data_source_id = normalize_text(
+        data_source_id
     )
 
     documents = (
-        get_firestore_client()
-        .collection_group(
-            DATA_IMPORT_COLLECTION
+        get_data_import_collection(
+            normalized_data_source_id
         )
         .stream()
     )
@@ -656,38 +663,31 @@ def get_uploaded_files(
     for document in documents:
         data = document.to_dict() or {}
 
-        if data.get(
-            "deleted",
-            False,
-        ):
+        if data.get("deleted", False):
+            continue
+
+        if normalize_key(
+            data.get("import_type", "")
+        ) != "file_upload":
             continue
 
         uploaded_files.append(
-            serialize_uploaded_file(
-                document
-            )
+            serialize_uploaded_file(document)
         )
 
     uploaded_files.sort(
-        key=lambda item:
-            item.get(
-                "updated_at"
-            )
-            or item.get(
-                "created_at"
-            )
-            or "",
+        key=lambda item: (
+            item.get("updated_at")
+            or item.get("created_at")
+            or ""
+        ),
         reverse=True,
     )
 
     return {
-        "uploaded_files":
-            uploaded_files,
-
-        "count":
-            len(
-                uploaded_files
-            ),
+        "data_source_id": normalized_data_source_id,
+        "uploaded_files": uploaded_files,
+        "count": len(uploaded_files),
     }
 
 
