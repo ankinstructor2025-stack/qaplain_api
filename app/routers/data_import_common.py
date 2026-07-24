@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urlencode, urlparse
@@ -392,6 +393,45 @@ def save_raw_response(
     return data
 
 
+def remove_payload_path(
+    payload: Any,
+    path: str,
+) -> Any:
+    """
+    JSONをFirestoreへ保存する前に、子・孫として分解する配列だけを除外する。
+    元のpayloadは変更せず、コピーを返す。
+    """
+    copied_payload = deepcopy(payload)
+    normalized_path = normalize_text(path)
+
+    if not normalized_path or not isinstance(copied_payload, dict):
+        return copied_payload
+
+    parts = [
+        part.strip()
+        for part in normalized_path.split(".")
+        if part.strip()
+    ]
+
+    if not parts:
+        return copied_payload
+
+    current = copied_payload
+
+    for part in parts[:-1]:
+        if not isinstance(current, dict):
+            return copied_payload
+
+        current = current.get(part)
+        if current is None:
+            return copied_payload
+
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
+
+    return copied_payload
+
+
 def save_json_item(
     *,
     payload: Any,
@@ -473,8 +513,31 @@ def save_json_item(
     )
 
     now = now_iso()
-    display_metadata = get_display_metadata(payload)
+
+    firestore_payload = deepcopy(payload)
+
+    if normalized_item_type == "parent":
+        firestore_payload = remove_payload_path(
+            firestore_payload,
+            data_source.get("child_array_path", ""),
+        )
+
+    elif normalized_item_type == "child":
+        firestore_payload = remove_payload_path(
+            firestore_payload,
+            data_source.get("grandchild_array_path", ""),
+        )
+
+    display_metadata = get_display_metadata(firestore_payload)
+
+    payload_fields = (
+        firestore_payload
+        if isinstance(firestore_payload, dict)
+        else {"value": serialize_value(firestore_payload)}
+    )
+
     data = {
+        **serialize_value(payload_fields),
         "item_id": item_id,
         "batch_id": batch_id,
         "task_id": task_id,
