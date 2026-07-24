@@ -2,8 +2,6 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from google.cloud.firestore_v1.base_query import FieldFilter
-
 from app.core.firebase import get_firestore_client
 
 
@@ -13,6 +11,7 @@ router = APIRouter(
 )
 
 
+DATA_SOURCE_COLLECTION = "data_sources"
 RAW_DOCUMENT_COLLECTION = "raw_documents"
 RECORD_COLLECTION = "records"
 
@@ -102,14 +101,9 @@ def list_documents(
     db = get_db()
 
     query = (
-        db.collection(RAW_DOCUMENT_COLLECTION)
-        .where(
-            filter=FieldFilter(
-                "data_source_id",
-                "==",
-                data_source_id,
-            )
-        )
+        db.collection(DATA_SOURCE_COLLECTION)
+        .document(data_source_id)
+        .collection(RAW_DOCUMENT_COLLECTION)
         .limit(limit)
     )
 
@@ -133,12 +127,15 @@ def list_documents(
 @router.get("/documents/{document_id}/records")
 def list_records(
     document_id: str,
+    data_source_id: str = Query(min_length=1),
     limit: int = Query(default=1000, ge=1, le=5000),
 ):
     db = get_db()
 
     document_reference = (
-        db.collection(RAW_DOCUMENT_COLLECTION)
+        db.collection(DATA_SOURCE_COLLECTION)
+        .document(data_source_id)
+        .collection(RAW_DOCUMENT_COLLECTION)
         .document(document_id)
     )
 
