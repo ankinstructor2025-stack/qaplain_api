@@ -290,15 +290,16 @@ def validate_parent_display_fields(
     if (
         normalized_pattern not in (
             "parent_child",
-            "parent_child_grandchild"
+            "parent_child_grandchild",
+            "file_links"
         )
         and fields
     ):
         raise HTTPException(
             status_code=400,
             detail=(
-                "親情報表示項目は親子展開または"
-                "親子孫展開で設定してください。"
+                "表示項目は親子展開、親子孫展開または"
+                "リンク先ファイル取得で設定してください。"
             )
         )
 
@@ -315,13 +316,13 @@ def validate_parent_display_fields(
         if not label:
             raise HTTPException(
                 status_code=400,
-                detail="親情報表示項目の表示名を入力してください。"
+                detail="表示項目の表示名を入力してください。"
             )
 
         if not path:
             raise HTTPException(
                 status_code=400,
-                detail="親情報表示項目のJSON項目パスを入力してください。"
+                detail="表示項目のJSON項目パスを入力してください。"
             )
 
         duplicate_path = path.lower()
@@ -330,7 +331,7 @@ def validate_parent_display_fields(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "親情報表示項目に同じJSON項目パスが"
+                    "表示項目に同じJSON項目パスが"
                     "重複しています。"
                 )
             )
