@@ -151,6 +151,10 @@ def serialize_uploaded_file(
     }
 
 
+CHILD_COLLECTION = "children"
+GRANDCHILD_COLLECTION = "grandchildren"
+
+
 def serialize_import(
     document,
 ) -> dict:
@@ -163,9 +167,127 @@ def serialize_import(
         or document.id
     )
 
+    data["document_path"] = (
+        document.reference.path
+    )
+
     return serialize_value(
         data
     )
+
+
+def sort_import_items(
+    items: list[dict],
+) -> list[dict]:
+    items.sort(
+        key=lambda item:
+            normalize_text(
+                item.get(
+                    "source_index"
+                )
+            ),
+    )
+
+    return items
+
+
+def load_grandchildren(
+    child_document,
+) -> list[dict]:
+    grandchildren = []
+
+    for document in (
+        child_document.reference
+        .collection(
+            GRANDCHILD_COLLECTION
+        )
+        .stream()
+    ):
+        item = serialize_import(
+            document
+        )
+
+        if item.get(
+            "deleted",
+            False,
+        ):
+            continue
+
+        grandchildren.append(
+            item
+        )
+
+    return sort_import_items(
+        grandchildren
+    )
+
+
+def load_children(
+    parent_document,
+) -> list[dict]:
+    children = []
+
+    for document in (
+        parent_document.reference
+        .collection(
+            CHILD_COLLECTION
+        )
+        .stream()
+    ):
+        item = serialize_import(
+            document
+        )
+
+        if item.get(
+            "deleted",
+            False,
+        ):
+            continue
+
+        grandchildren = load_grandchildren(
+            document
+        )
+
+        item["grandchildren"] = (
+            grandchildren
+        )
+        item["grandchild_count"] = len(
+            grandchildren
+        )
+
+        children.append(
+            item
+        )
+
+    return sort_import_items(
+        children
+    )
+
+
+def serialize_import_tree(
+    document,
+) -> dict:
+    item = serialize_import(
+        document
+    )
+
+    children = load_children(
+        document
+    )
+
+    item["children"] = children
+    item["child_count"] = len(
+        children
+    )
+    item["grandchild_count"] = sum(
+        child.get(
+            "grandchild_count",
+            0,
+        )
+        for child in children
+    )
+
+    return item
 
 
 @router.post(
@@ -711,7 +833,7 @@ def get_imports(
         )
     )
 
-    documents = (
+    documents = list(
         get_data_import_collection(
             normalized_data_source_id
         )
@@ -721,18 +843,18 @@ def get_imports(
     imports = []
 
     for document in documents:
-        item = serialize_import(
-            document
-        )
+        data = document.to_dict() or {}
 
-        if item.get(
+        if data.get(
             "deleted",
             False,
         ):
             continue
 
         imports.append(
-            item
+            serialize_import_tree(
+                document
+            )
         )
 
     imports.sort(
@@ -747,6 +869,24 @@ def get_imports(
                 or ""
             ),
         reverse=True,
+    )
+
+    parent_count = len(
+        imports
+    )
+    child_count = sum(
+        item.get(
+            "child_count",
+            0,
+        )
+        for item in imports
+    )
+    grandchild_count = sum(
+        item.get(
+            "grandchild_count",
+            0,
+        )
+        for item in imports
     )
 
     return {
@@ -764,7 +904,18 @@ def get_imports(
             imports,
 
         "count":
-            len(
-                imports
+            (
+                parent_count
+                + child_count
+                + grandchild_count
             ),
+
+        "parent_count":
+            parent_count,
+
+        "child_count":
+            child_count,
+
+        "grandchild_count":
+            grandchild_count,
     }

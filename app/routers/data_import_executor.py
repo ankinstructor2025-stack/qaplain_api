@@ -458,29 +458,45 @@ def get_active_import_tasks(data_source_id: str) -> list[dict]:
     ]
 
 
+def delete_collection_recursively(
+    collection_reference,
+    batch_size: int = 200,
+) -> int:
+    deleted_count = 0
+
+    while True:
+        documents = list(
+            collection_reference
+            .limit(batch_size)
+            .stream()
+        )
+
+        if not documents:
+            return deleted_count
+
+        for document in documents:
+            for child_collection in (
+                document.reference.collections()
+            ):
+                deleted_count += (
+                    delete_collection_recursively(
+                        child_collection,
+                        batch_size=batch_size,
+                    )
+                )
+
+            document.reference.delete()
+            deleted_count += 1
+
+
 def delete_import_documents(
     data_source_id: str,
 ) -> int:
-    documents = list(
+    return delete_collection_recursively(
         get_data_import_collection(
             data_source_id
-        ).stream()
+        )
     )
-
-    deleted_count = 0
-    for offset in range(0, len(documents), 400):
-        batch = get_firestore_client().batch()
-        chunk = documents[offset:offset + 400]
-
-        for document in chunk:
-            batch.delete(document.reference)
-
-        if chunk:
-            batch.commit()
-            deleted_count += len(chunk)
-
-    return deleted_count
-
 
 def delete_documents_by_data_source(
     collection_name: str,
@@ -867,9 +883,16 @@ def execute_save_json_task(*, data_source: dict, user: dict, task_data: dict) ->
         task_id=task_data["task_id"],
         item_type=normalize_text(payload.get("item_type", "item")),
         level=int(payload.get("level", 1)),
-        parent_id=normalize_text(payload.get("parent_id")) or None,
+        parent_id=normalize_text(
+            payload.get("parent_id")
+        ) or None,
+        root_parent_id=normalize_text(
+            payload.get("root_parent_id")
+        ) or None,
         source_index=payload.get("source_index"),
-        item_id=normalize_text(payload.get("fixed_item_id")) or None,
+        item_id=normalize_text(
+            payload.get("fixed_item_id")
+        ) or None,
     )
     return {"item_id": item["item_id"], "result_item_count": 1}
 

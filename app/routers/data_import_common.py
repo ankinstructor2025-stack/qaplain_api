@@ -404,14 +404,73 @@ def save_json_item(
     parent_id: str | None,
     source_index: int | None = None,
     item_id: str | None = None,
+    root_parent_id: str | None = None,
 ) -> dict:
     item_id = normalize_text(item_id) or uuid.uuid4().hex
-    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    gcs_path = (
-        f"data-sources/{data_source['data_source_id']}/"
-        f"imports/{batch_id}/items/{item_id}/data.json"
+    normalized_item_type = normalize_key(item_type)
+    normalized_parent_id = normalize_text(parent_id) or None
+    normalized_root_parent_id = (
+        normalize_text(root_parent_id)
+        or (
+            item_id
+            if level == 1
+            else None
+        )
     )
-    _save_bytes_to_storage(content, "application/json", gcs_path)
+
+    content = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+
+    if level == 1:
+        gcs_path = (
+            f"data-sources/{data_source['data_source_id']}/"
+            f"imports/{batch_id}/parents/{item_id}/data.json"
+        )
+    elif level == 2:
+        if not normalized_parent_id:
+            raise HTTPException(
+                status_code=400,
+                detail="子データの親IDがありません。",
+            )
+
+        gcs_path = (
+            f"data-sources/{data_source['data_source_id']}/"
+            f"imports/{batch_id}/parents/{normalized_parent_id}/"
+            f"children/{item_id}/data.json"
+        )
+    elif level == 3:
+        if not normalized_root_parent_id:
+            raise HTTPException(
+                status_code=400,
+                detail="孫データの親データIDがありません。",
+            )
+
+        if not normalized_parent_id:
+            raise HTTPException(
+                status_code=400,
+                detail="孫データの子データIDがありません。",
+            )
+
+        gcs_path = (
+            f"data-sources/{data_source['data_source_id']}/"
+            f"imports/{batch_id}/parents/{normalized_root_parent_id}/"
+            f"children/{normalized_parent_id}/"
+            f"grandchildren/{item_id}/data.json"
+        )
+    else:
+        gcs_path = (
+            f"data-sources/{data_source['data_source_id']}/"
+            f"imports/{batch_id}/items/{item_id}/data.json"
+        )
+
+    _save_bytes_to_storage(
+        content,
+        "application/json",
+        gcs_path,
+    )
 
     now = now_iso()
     display_metadata = get_display_metadata(payload)
@@ -420,11 +479,21 @@ def save_json_item(
         "batch_id": batch_id,
         "task_id": task_id,
         "data_source_id": data_source["data_source_id"],
-        "data_source_name": data_source.get("data_source_name", ""),
-        "tenant_id": data_source.get("tenant_id", ""),
-        "processing_pattern": data_source.get("processing_pattern", "raw"),
-        "parent_id": parent_id,
-        "item_type": item_type,
+        "data_source_name": data_source.get(
+            "data_source_name",
+            "",
+        ),
+        "tenant_id": data_source.get(
+            "tenant_id",
+            "",
+        ),
+        "processing_pattern": data_source.get(
+            "processing_pattern",
+            "raw",
+        ),
+        "parent_id": normalized_parent_id,
+        "root_parent_id": normalized_root_parent_id,
+        "item_type": normalized_item_type,
         "level": level,
         "source_index": source_index,
         **display_metadata,
@@ -441,15 +510,48 @@ def save_json_item(
         "updated_by": user.get("email", ""),
     }
 
+    root_collection = get_data_import_collection(
+        data_source["data_source_id"]
+    )
+
+    if level == 1:
+        reference = root_collection.document(item_id)
+
+    elif level == 2:
+        reference = (
+            root_collection
+            .document(normalized_parent_id)
+            .collection("children")
+            .document(item_id)
+        )
+
+    elif level == 3:
+        reference = (
+            root_collection
+            .document(normalized_root_parent_id)
+            .collection("children")
+            .document(normalized_parent_id)
+            .collection("grandchildren")
+            .document(item_id)
+        )
+
+    else:
+        reference = root_collection.document(item_id)
+
     try:
-        get_data_import_collection(data_source["data_source_id"]).document(item_id).set(data)
+        reference.set(data)
     except Exception as error:
         delete_from_storage(gcs_path)
-        print(f"Firestore registration error: {type(error).__name__}: {error}")
-        raise HTTPException(status_code=500, detail="取込データの登録に失敗しました。")
+        print(
+            "Firestore registration error: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="取込データの登録に失敗しました。",
+        )
 
     return data
-
 
 def save_downloaded_file(
     *,
