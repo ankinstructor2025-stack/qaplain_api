@@ -59,21 +59,52 @@ def get_item_document(
             detail="取込データIDが指定されていません。",
         )
 
-    document = (
-        get_data_import_collection(
-            normalized_data_source_id
-        )
+    root_collection = get_data_import_collection(
+        normalized_data_source_id
+    )
+
+    # 親・一覧・ファイルなど、ルート直下のドキュメントを確認する。
+    root_document = (
+        root_collection
         .document(normalized_item_id)
         .get()
     )
 
-    if not document.exists:
-        raise HTTPException(
-            status_code=404,
-            detail="取込データが見つかりません。",
+    if root_document.exists:
+        return root_document
+
+    # 子・孫はサブコレクションに格納されているため、
+    # ルート配下をたどって対象IDを検索する。
+    for parent_document in root_collection.stream():
+        child_collection = (
+            parent_document.reference
+            .collection("children")
         )
 
-    return document
+        child_document = (
+            child_collection
+            .document(normalized_item_id)
+            .get()
+        )
+
+        if child_document.exists:
+            return child_document
+
+        for existing_child_document in child_collection.stream():
+            grandchild_document = (
+                existing_child_document.reference
+                .collection("grandchildren")
+                .document(normalized_item_id)
+                .get()
+            )
+
+            if grandchild_document.exists:
+                return grandchild_document
+
+    raise HTTPException(
+        status_code=404,
+        detail="取込データが見つかりません。",
+    )
 
 
 def build_effective_file_name(item: dict, item_id: str) -> str:
@@ -252,18 +283,70 @@ def list_items(
 
     normalized_data_source_id = normalize_text(data_source_id)
 
-    documents = (
+    root_documents = (
         get_data_import_collection(
             normalized_data_source_id
         )
         .stream()
     )
 
-    items = [
-        serialize_item_summary(document)
-        for document in documents
-        if not (document.to_dict() or {}).get("deleted", False)
-    ]
+    items = []
+
+    # data_import直下の親データに加え、
+    # children・grandchildrenサブコレクションも一覧へ含める。
+    for root_document in root_documents:
+        root_data = root_document.to_dict() or {}
+
+        if root_data.get("deleted", False):
+            continue
+
+        items.append(
+            serialize_item_summary(
+                root_document
+            )
+        )
+
+        child_documents = (
+            root_document.reference
+            .collection("children")
+            .stream()
+        )
+
+        for child_document in child_documents:
+            child_data = child_document.to_dict() or {}
+
+            if child_data.get("deleted", False):
+                continue
+
+            items.append(
+                serialize_item_summary(
+                    child_document
+                )
+            )
+
+            grandchild_documents = (
+                child_document.reference
+                .collection("grandchildren")
+                .stream()
+            )
+
+            for grandchild_document in grandchild_documents:
+                grandchild_data = (
+                    grandchild_document.to_dict()
+                    or {}
+                )
+
+                if grandchild_data.get(
+                    "deleted",
+                    False,
+                ):
+                    continue
+
+                items.append(
+                    serialize_item_summary(
+                        grandchild_document
+                    )
+                )
 
     items.sort(key=get_item_sort_key)
 
