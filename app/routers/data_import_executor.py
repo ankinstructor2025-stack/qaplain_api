@@ -439,6 +439,9 @@ def submit_task(queue_config: dict, task_data: dict) -> None:
     )
 
 
+RAW_DOCUMENT_COLLECTION = "raw_documents"
+DATA_RAW_BATCH_COLLECTION = "data_raw_batches"
+
 ACTIVE_TASK_STATUSES = {"queued", "running"}
 
 
@@ -458,44 +461,68 @@ def get_active_import_tasks(data_source_id: str) -> list[dict]:
     ]
 
 
-def delete_collection_recursively(
+def recursive_delete_collection(
     collection_reference,
-    batch_size: int = 200,
 ) -> int:
-    deleted_count = 0
+    """
+    CollectionReference配下をサブコレクションも含めて完全削除する。
+    google-cloud-firestore の公式 recursive_delete() を利用する。
+    """
+    db = get_firestore_client()
 
-    while True:
-        documents = list(
+    try:
+        result = db.recursive_delete(
             collection_reference
-            .limit(batch_size)
-            .stream()
         )
+    except AttributeError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Firestoreクライアントがrecursive_deleteに"
+                "対応していません。google-cloud-firestoreを"
+                "更新してください。"
+            ),
+        ) from error
+    except Exception as error:
+        print(
+            "Firestore recursive delete error: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Firestoreの階層データを"
+                "完全削除できませんでした。"
+            ),
+        ) from error
 
-        if not documents:
-            return deleted_count
-
-        for document in documents:
-            for child_collection in (
-                document.reference.collections()
-            ):
-                deleted_count += (
-                    delete_collection_recursively(
-                        child_collection,
-                        batch_size=batch_size,
-                    )
-                )
-
-            document.reference.delete()
-            deleted_count += 1
+    return int(result or 0)
 
 
 def delete_import_documents(
     data_source_id: str,
 ) -> int:
-    return delete_collection_recursively(
+    return recursive_delete_collection(
         get_data_import_collection(
             data_source_id
         )
+    )
+
+
+def delete_raw_documents(
+    data_source_id: str,
+) -> int:
+    collection_reference = (
+        get_firestore_client()
+        .collection("data_sources")
+        .document(data_source_id)
+        .collection(
+            RAW_DOCUMENT_COLLECTION
+        )
+    )
+
+    return recursive_delete_collection(
+        collection_reference
     )
 
 def delete_documents_by_data_source(
@@ -572,6 +599,100 @@ def reset_import_data(data_source: dict) -> dict:
         "deleted_storage_count": deleted_storage_count,
         "deleted_item_count": deleted_item_count,
         "deleted_task_count": deleted_task_count,
+    }
+
+
+def delete_data_source_import_data(
+    *,
+    data_source: dict,
+    user: dict,
+) -> dict:
+    data_source_id = normalize_text(
+        data_source.get(
+            "data_source_id"
+        )
+    )
+
+    if not data_source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="データソースIDが指定されていません。",
+        )
+
+    active_tasks = get_active_import_tasks(
+        data_source_id
+    )
+
+    if active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IMPORT_IN_PROGRESS",
+                "message": (
+                    "処理中の取込タスクがあるため"
+                    "削除できません。"
+                ),
+                "active_task_count": len(
+                    active_tasks
+                ),
+            },
+        )
+
+    deleted_import_count = (
+        delete_import_documents(
+            data_source_id
+        )
+    )
+
+    deleted_raw_count = (
+        delete_raw_documents(
+            data_source_id
+        )
+    )
+
+    deleted_storage_count = (
+        delete_storage_by_data_source(
+            data_source_id
+        )
+    )
+
+    deleted_task_count = (
+        delete_documents_by_data_source(
+            DATA_IMPORT_TASK_COLLECTION,
+            data_source_id,
+        )
+    )
+
+    deleted_analysis_batch_count = (
+        delete_documents_by_data_source(
+            DATA_RAW_BATCH_COLLECTION,
+            data_source_id,
+        )
+    )
+
+    return {
+        "status": "deleted",
+        "data_source_id": data_source_id,
+        "deleted_by": user.get(
+            "email",
+            "",
+        ),
+        "deleted_counts": {
+            "data_import":
+                deleted_import_count,
+            "raw_documents":
+                deleted_raw_count,
+            "storage_objects":
+                deleted_storage_count,
+            "import_tasks":
+                deleted_task_count,
+            "analysis_batches":
+                deleted_analysis_batch_count,
+        },
+        "message": (
+            "データソース配下の取込・解析データを"
+            "すべて削除しました。"
+        ),
     }
 
 
@@ -883,16 +1004,9 @@ def execute_save_json_task(*, data_source: dict, user: dict, task_data: dict) ->
         task_id=task_data["task_id"],
         item_type=normalize_text(payload.get("item_type", "item")),
         level=int(payload.get("level", 1)),
-        parent_id=normalize_text(
-            payload.get("parent_id")
-        ) or None,
-        root_parent_id=normalize_text(
-            payload.get("root_parent_id")
-        ) or None,
+        parent_id=normalize_text(payload.get("parent_id")) or None,
         source_index=payload.get("source_index"),
-        item_id=normalize_text(
-            payload.get("fixed_item_id")
-        ) or None,
+        item_id=normalize_text(payload.get("fixed_item_id")) or None,
     )
     return {"item_id": item["item_id"], "result_item_count": 1}
 
