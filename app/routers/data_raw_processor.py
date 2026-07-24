@@ -240,7 +240,9 @@ def _record(
     }
 
 
-def _records_from_json(content: bytes) -> list[dict]:
+def _records_from_json(
+    content: bytes,
+) -> tuple[list[dict], dict]:
     try:
         data = json.loads(
             content.decode(
@@ -257,88 +259,137 @@ def _records_from_json(content: bytes) -> list[dict]:
         )
 
     if isinstance(data, list):
-        values = data
-        root_name = "root"
-    elif isinstance(data, dict):
-        list_candidates = [
-            (key, value)
-            for key, value in data.items()
-            if isinstance(value, list)
-        ]
+        records = []
 
-        if len(list_candidates) == 1:
-            root_name, values = list_candidates[0]
-        else:
-            return [
-                _record(
-                    record_type="json_object",
-                    title="root",
-                    sequence=1,
-                    structured_data=data,
-                    content=json.dumps(
-                        data,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+        for index, value in enumerate(
+            data,
+            start=1,
+        ):
+            records.append(
+                _create_json_record(
+                    root_name="root",
+                    value=value,
+                    sequence=index,
+                    array_index=index - 1,
                 )
-            ]
-    else:
-        return [
-            _record(
-                record_type="json_value",
-                title="root",
-                sequence=1,
-                structured_data=data,
-                content=json.dumps(
-                    data,
-                    ensure_ascii=False,
-                ),
             )
-        ]
+
+        return records, {
+            "json_root_type": "array",
+            "json_root_name": "root",
+        }
+
+    if not isinstance(data, dict):
+        return [], {
+            "json_root_type": "value",
+            "value": _safe_value(data),
+        }
+
+    parent_data = {}
+    array_fields = []
+
+    for key, value in data.items():
+        if isinstance(value, list):
+            array_fields.append(
+                (
+                    normalize_text(key)
+                    or "items",
+                    value,
+                )
+            )
+        else:
+            parent_data[key] = _safe_value(value)
+
+    parent_data["json_root_type"] = "object"
+    parent_data["json_array_names"] = [
+        root_name
+        for root_name, _ in array_fields
+    ]
 
     records = []
+    sequence = 1
 
-    for index, value in enumerate(
-        values,
-        start=1,
-    ):
-        title = ""
-
-        if isinstance(value, dict):
-            for key in (
-                "title",
-                "name",
-                "subject",
-                "id",
-                "record_id",
-            ):
-                if value.get(key) is not None:
-                    title = normalize_text(
-                        value.get(key)
-                    )
-                    if title:
-                        break
-
-        records.append(
-            _record(
-                record_type="json_item",
-                title=title or f"{root_name}[{index - 1}]",
-                sequence=index,
-                structured_data=value,
-                content=json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                metadata={
-                    "root_name": root_name,
-                    "array_index": index - 1,
-                },
+    for root_name, values in array_fields:
+        for array_index, value in enumerate(values):
+            records.append(
+                _create_json_record(
+                    root_name=root_name,
+                    value=value,
+                    sequence=sequence,
+                    array_index=array_index,
+                )
             )
-        )
+            sequence += 1
 
-    return records
+    return records, parent_data
 
+
+def _create_json_record(
+    *,
+    root_name: str,
+    value: Any,
+    sequence: int,
+    array_index: int,
+) -> dict:
+    title = ""
+
+    if isinstance(value, dict):
+        for key in (
+            "title",
+            "name",
+            "subject",
+            "id",
+            "record_id",
+            "speechID",
+            "issueID",
+        ):
+            title = normalize_text(
+                value.get(key)
+            )
+
+            if title:
+                break
+
+    record = _record(
+        record_type=(
+            "json_object"
+            if isinstance(value, dict)
+            else "json_array"
+            if isinstance(value, list)
+            else "json_value"
+        ),
+        title=(
+            title
+            or f"{root_name}[{array_index}]"
+        ),
+        sequence=sequence,
+        content=json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        metadata={
+            "root_name": root_name,
+            "array_index": array_index,
+        },
+    )
+
+    if isinstance(value, dict):
+        for key, child_value in value.items():
+            safe_child_value = _safe_value(
+                child_value
+            )
+
+            if key in record:
+                record[f"json_{key}"] = (
+                    safe_child_value
+                )
+            else:
+                record[key] = safe_child_value
+    else:
+        record["value"] = _safe_value(value)
+
+    return record
 
 def _xml_element_to_data(
     element: ET.Element,
@@ -967,7 +1018,7 @@ def analyze_file(
     )
 
     if normalized_extension == "json":
-        return _records_from_json(content), {}
+        return _records_from_json(content)
 
     if normalized_extension == "xml":
         return _records_from_xml(content), {}
@@ -1302,10 +1353,21 @@ def process_source_file(
 
     content = _download_source(source)
 
-    records, analysis_metadata = analyze_file(
+    records, analyzer_data = analyze_file(
         extension,
         content,
     )
+
+    if extension == "json":
+        parent_fields = _safe_value(
+            analyzer_data
+        )
+        analysis_metadata = {}
+    else:
+        parent_fields = {}
+        analysis_metadata = _safe_value(
+            analyzer_data
+        )
 
     document_id = (
         f"{source['source_type']}_"
@@ -1341,6 +1403,7 @@ def process_source_file(
     now = now_iso()
 
     document_data = {
+        **parent_fields,
         "document_id":
             document_id,
         "source_type":
@@ -1370,8 +1433,12 @@ def process_source_file(
         "record_count":
             len(records),
         "analysis_metadata":
-            _safe_value(
-                analysis_metadata
+            analysis_metadata,
+        "json_parent_fields":
+            (
+                sorted(parent_fields.keys())
+                if extension == "json"
+                else firestore.DELETE_FIELD
             ),
         "status":
             "processed",
