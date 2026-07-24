@@ -1544,6 +1544,337 @@ def _write_import_record(
     return record_count
 
 
+
+def _get_relation_item_sort_key(
+    item: dict,
+) -> tuple:
+    try:
+        source_index = int(
+            item.get("source_index")
+        )
+    except (TypeError, ValueError):
+        source_index = 999999999
+
+    return (
+        source_index,
+        normalize_text(
+            item.get("created_at")
+        ),
+        normalize_text(
+            item.get("item_id")
+        ),
+    )
+
+
+def _build_relation_record_data(
+    *,
+    item_data: dict,
+    content: bytes,
+    document_id: str,
+    parent_source: dict,
+    user: dict,
+) -> dict:
+    value = _load_json_object(
+        content
+    )
+
+    item_id = (
+        normalize_text(
+            item_data.get("item_id")
+        )
+        or uuid.uuid4().hex
+    )
+
+    now = now_iso()
+
+    # 元JSONを保持したうえで、管理項目は必ずシステム側の値を優先する。
+    return {
+        **value,
+        "record_id":
+            item_id,
+        "document_id":
+            document_id,
+        "source_type":
+            parent_source["source_type"],
+        "source_id":
+            item_id,
+        "data_source_id":
+            parent_source["data_source_id"],
+        "tenant_id":
+            parent_source["tenant_id"],
+        "item_type":
+            normalize_text(
+                item_data.get("item_type")
+            ).lower(),
+        "level":
+            int(
+                item_data.get("level", 0)
+                or 0
+            ),
+        "parent_id":
+            normalize_text(
+                item_data.get("parent_id")
+            )
+            or None,
+        "root_parent_id":
+            normalize_text(
+                item_data.get("root_parent_id")
+            )
+            or parent_source["source_id"],
+        "source_index":
+            item_data.get("source_index"),
+        "gcs_path":
+            normalize_text(
+                item_data.get("gcs_path")
+            ),
+        "gcs_uri":
+            normalize_text(
+                item_data.get("gcs_uri")
+            ),
+        "created_at":
+            now,
+        "created_by":
+            user.get("email", ""),
+        "updated_at":
+            now,
+        "updated_by":
+            user.get("email", ""),
+    }
+
+
+def _download_import_item(
+    item_data: dict,
+) -> bytes:
+    gcs_path = normalize_text(
+        item_data.get("gcs_path")
+    )
+
+    if not gcs_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "子データのCloud Storage保存先が"
+                "登録されていません。"
+            ),
+        )
+
+    try:
+        blob = get_storage_bucket().blob(
+            gcs_path
+        )
+
+        if not blob.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "子データがCloud Storageに"
+                    "見つかりません。"
+                ),
+            )
+
+        return blob.download_as_bytes()
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "子データをCloud Storageから"
+                "取得できませんでした。"
+                f" {type(error).__name__}: {error}"
+            ),
+        )
+
+
+def _write_relation_records(
+    *,
+    document_reference,
+    document_id: str,
+    parent_source: dict,
+    user: dict,
+    include_grandchildren: bool,
+) -> int:
+    parent_reference = (
+        parent_source["source_reference"]
+    )
+
+    child_documents = list(
+        parent_reference
+        .collection("children")
+        .stream()
+    )
+
+    child_items = []
+
+    for child_document in child_documents:
+        child_data = (
+            child_document.to_dict()
+            or {}
+        )
+
+        if child_data.get(
+            "deleted",
+            False,
+        ):
+            continue
+
+        child_items.append({
+            **child_data,
+            "item_id":
+                normalize_text(
+                    child_data.get("item_id")
+                )
+                or child_document.id,
+            "reference":
+                child_document.reference,
+        })
+
+    child_items.sort(
+        key=_get_relation_item_sort_key
+    )
+
+    record_items = []
+
+    for child_item in child_items:
+        record_items.append(
+            child_item
+        )
+
+        if not include_grandchildren:
+            continue
+
+        grandchild_documents = list(
+            child_item["reference"]
+            .collection("grandchildren")
+            .stream()
+        )
+
+        grandchild_items = []
+
+        for grandchild_document in (
+            grandchild_documents
+        ):
+            grandchild_data = (
+                grandchild_document.to_dict()
+                or {}
+            )
+
+            if grandchild_data.get(
+                "deleted",
+                False,
+            ):
+                continue
+
+            grandchild_items.append({
+                **grandchild_data,
+                "item_id":
+                    normalize_text(
+                        grandchild_data.get(
+                            "item_id"
+                        )
+                    )
+                    or grandchild_document.id,
+                "reference":
+                    grandchild_document.reference,
+            })
+
+        grandchild_items.sort(
+            key=_get_relation_item_sort_key
+        )
+
+        record_items.extend(
+            grandchild_items
+        )
+
+    db = get_firestore_client()
+    batch = db.batch()
+    operation_count = 0
+    record_count = 0
+    now = now_iso()
+
+    for item in record_items:
+        content = _download_import_item(
+            item
+        )
+
+        record_data = (
+            _build_relation_record_data(
+                item_data=item,
+                content=content,
+                document_id=document_id,
+                parent_source=parent_source,
+                user=user,
+            )
+        )
+
+        record_id = record_data[
+            "record_id"
+        ]
+
+        record_reference = (
+            document_reference
+            .collection(
+                RAW_RECORD_SUBCOLLECTION
+            )
+            .document(record_id)
+        )
+
+        batch.set(
+            record_reference,
+            record_data,
+        )
+
+        batch.set(
+            item["reference"],
+            {
+                "raw_document_id":
+                    document_id,
+                "analysis_status":
+                    "completed",
+                "analysis_record_count":
+                    1,
+                "analyzed_at":
+                    now,
+                "analysis_completed_at":
+                    now,
+                "analyzed_by":
+                    user.get("email", ""),
+                "updated_at":
+                    now,
+            },
+            merge=True,
+        )
+
+        operation_count += 2
+        record_count += 1
+
+        if operation_count >= (
+            BATCH_WRITE_LIMIT - 2
+        ):
+            batch.commit()
+            batch = db.batch()
+            operation_count = 0
+
+    if operation_count:
+        batch.commit()
+
+    document_reference.set(
+        {
+            "record_count":
+                record_count,
+            "updated_at":
+                now_iso(),
+            "updated_by":
+                user.get("email", ""),
+        },
+        merge=True,
+    )
+
+    return record_count
+
+
 def process_source_file(
     *,
     data_source_id: str,
@@ -1622,7 +1953,23 @@ def process_source_file(
                 document_data,
                 merge=True,
             )
-            record_count = 0
+
+            record_count = (
+                _write_relation_records(
+                    document_reference=
+                        document_reference,
+                    document_id=
+                        document_id,
+                    parent_source=
+                        source,
+                    user=
+                        user,
+                    include_grandchildren=(
+                        processing_pattern
+                        == "parent_child_grandchild"
+                    ),
+                )
+            )
         else:
             if not existing_document.exists:
                 parent_item = _get_import_item(
