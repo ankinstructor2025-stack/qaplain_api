@@ -532,6 +532,19 @@ def iter_import_documents(
         ):
             continue
 
+        processing_pattern = normalize_text(
+            data.get("processing_pattern")
+        ).lower()
+        item_type = normalize_text(
+            data.get("item_type")
+        ).lower()
+
+        if (
+            processing_pattern != "raw"
+            and item_type == "raw_response"
+        ):
+            continue
+
         source_id = normalize_text(
             data.get("item_id")
         ) or document.id

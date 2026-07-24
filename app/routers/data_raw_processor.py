@@ -240,9 +240,7 @@ def _record(
     }
 
 
-def _records_from_json(
-    content: bytes,
-) -> tuple[list[dict], dict]:
+def _records_from_json(content: bytes) -> list[dict]:
     try:
         data = json.loads(
             content.decode(
@@ -259,137 +257,88 @@ def _records_from_json(
         )
 
     if isinstance(data, list):
-        records = []
+        values = data
+        root_name = "root"
+    elif isinstance(data, dict):
+        list_candidates = [
+            (key, value)
+            for key, value in data.items()
+            if isinstance(value, list)
+        ]
 
-        for index, value in enumerate(
-            data,
-            start=1,
-        ):
-            records.append(
-                _create_json_record(
-                    root_name="root",
-                    value=value,
-                    sequence=index,
-                    array_index=index - 1,
-                )
-            )
-
-        return records, {
-            "json_root_type": "array",
-            "json_root_name": "root",
-        }
-
-    if not isinstance(data, dict):
-        return [], {
-            "json_root_type": "value",
-            "value": _safe_value(data),
-        }
-
-    parent_data = {}
-    array_fields = []
-
-    for key, value in data.items():
-        if isinstance(value, list):
-            array_fields.append(
-                (
-                    normalize_text(key)
-                    or "items",
-                    value,
-                )
-            )
+        if len(list_candidates) == 1:
+            root_name, values = list_candidates[0]
         else:
-            parent_data[key] = _safe_value(value)
-
-    parent_data["json_root_type"] = "object"
-    parent_data["json_array_names"] = [
-        root_name
-        for root_name, _ in array_fields
-    ]
+            return [
+                _record(
+                    record_type="json_object",
+                    title="root",
+                    sequence=1,
+                    structured_data=data,
+                    content=json.dumps(
+                        data,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+            ]
+    else:
+        return [
+            _record(
+                record_type="json_value",
+                title="root",
+                sequence=1,
+                structured_data=data,
+                content=json.dumps(
+                    data,
+                    ensure_ascii=False,
+                ),
+            )
+        ]
 
     records = []
-    sequence = 1
 
-    for root_name, values in array_fields:
-        for array_index, value in enumerate(values):
-            records.append(
-                _create_json_record(
-                    root_name=root_name,
-                    value=value,
-                    sequence=sequence,
-                    array_index=array_index,
-                )
+    for index, value in enumerate(
+        values,
+        start=1,
+    ):
+        title = ""
+
+        if isinstance(value, dict):
+            for key in (
+                "title",
+                "name",
+                "subject",
+                "id",
+                "record_id",
+            ):
+                if value.get(key) is not None:
+                    title = normalize_text(
+                        value.get(key)
+                    )
+                    if title:
+                        break
+
+        records.append(
+            _record(
+                record_type="json_item",
+                title=title or f"{root_name}[{index - 1}]",
+                sequence=index,
+                structured_data=value,
+                content=json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                metadata={
+                    "root_name": root_name,
+                    "array_index": index - 1,
+                },
             )
-            sequence += 1
+        )
 
-    return records, parent_data
+    return records
 
-
-def _create_json_record(
-    *,
-    root_name: str,
-    value: Any,
-    sequence: int,
-    array_index: int,
-) -> dict:
-    title = ""
-
-    if isinstance(value, dict):
-        for key in (
-            "title",
-            "name",
-            "subject",
-            "id",
-            "record_id",
-            "speechID",
-            "issueID",
-        ):
-            title = normalize_text(
-                value.get(key)
-            )
-
-            if title:
-                break
-
-    record = _record(
-        record_type=(
-            "json_object"
-            if isinstance(value, dict)
-            else "json_array"
-            if isinstance(value, list)
-            else "json_value"
-        ),
-        title=(
-            title
-            or f"{root_name}[{array_index}]"
-        ),
-        sequence=sequence,
-        content=json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        metadata={
-            "root_name": root_name,
-            "array_index": array_index,
-        },
-    )
-
-    if isinstance(value, dict):
-        for key, child_value in value.items():
-            safe_child_value = _safe_value(
-                child_value
-            )
-
-            if key in record:
-                record[f"json_{key}"] = (
-                    safe_child_value
-                )
-            else:
-                record[key] = safe_child_value
-    else:
-        record["value"] = _safe_value(value)
-
-    return record
 
 def _xml_element_to_data(
     element: ET.Element,
@@ -1018,7 +967,7 @@ def analyze_file(
     )
 
     if normalized_extension == "json":
-        return _records_from_json(content)
+        return _records_from_json(content), {}
 
     if normalized_extension == "xml":
         return _records_from_xml(content), {}
@@ -1176,6 +1125,17 @@ def get_source_file(
         ),
         "gcs_path": gcs_path,
         "gcs_uri": normalize_text(data.get("gcs_uri")),
+        "processing_pattern": normalize_text(
+            data.get("processing_pattern")
+        ).lower(),
+        "item_type": normalize_text(
+            data.get("item_type")
+        ).lower(),
+        "level": int(data.get("level", 0) or 0),
+        "parent_id": normalize_text(
+            data.get("parent_id")
+        ) or None,
+        "source_index": data.get("source_index"),
     }
 
 
@@ -1335,6 +1295,255 @@ def _write_records(
         batch.commit()
 
 
+def _load_json_object(content: bytes) -> dict:
+    try:
+        value = json.loads(
+            content.decode("utf-8-sig")
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "JSONファイルを解析できません。"
+                f" {type(error).__name__}: {error}"
+            ),
+        )
+
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="親子形式のJSONはオブジェクトである必要があります。",
+        )
+
+    return _safe_value(value)
+
+
+def _delete_path_value(
+    source: dict,
+    path: str,
+) -> None:
+    parts = [
+        part.strip()
+        for part in normalize_text(path).split(".")
+        if part.strip()
+    ]
+
+    if not parts:
+        return
+
+    current = source
+
+    for part in parts[:-1]:
+        if not isinstance(current, dict):
+            return
+        current = current.get(part)
+
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
+
+
+def _get_data_source_structure(
+    data_source_id: str,
+) -> dict:
+    document = (
+        get_firestore_client()
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(data_source_id)
+        .get()
+    )
+
+    data = document.to_dict() or {}
+
+    return {
+        "processing_pattern": normalize_text(
+            data.get("processing_pattern")
+        ).lower(),
+        "child_array_path": normalize_text(
+            data.get("child_array_path")
+        ),
+        "grandchild_array_path": normalize_text(
+            data.get("grandchild_array_path")
+        ),
+    }
+
+
+def _get_import_item(
+    data_source_id: str,
+    item_id: str,
+) -> dict:
+    reference = (
+        get_firestore_client()
+        .collection(DATA_SOURCE_COLLECTION)
+        .document(data_source_id)
+        .collection(DATA_IMPORT_COLLECTION)
+        .document(item_id)
+    )
+    document = reference.get()
+
+    if not document.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="親の取込データが見つかりません。",
+        )
+
+    return {
+        **(document.to_dict() or {}),
+        "item_id": document.id,
+        "reference": reference,
+    }
+
+
+def _get_root_parent_id(
+    source: dict,
+) -> str:
+    parent_id = normalize_text(
+        source.get("parent_id")
+    )
+
+    if not parent_id:
+        return source["source_id"]
+
+    current_id = parent_id
+
+    for _ in range(10):
+        item = _get_import_item(
+            source["data_source_id"],
+            current_id,
+        )
+        next_parent_id = normalize_text(
+            item.get("parent_id")
+        )
+
+        if not next_parent_id:
+            return normalize_text(
+                item.get("item_id")
+            ) or current_id
+
+        current_id = next_parent_id
+
+    raise HTTPException(
+        status_code=400,
+        detail="親子階層が深すぎるため解析できません。",
+    )
+
+
+def _build_parent_document_data(
+    *,
+    source: dict,
+    content: bytes,
+    document_id: str,
+    user: dict,
+    existing: bool,
+) -> dict:
+    parent_fields = _load_json_object(content)
+    structure = _get_data_source_structure(
+        source["data_source_id"]
+    )
+
+    _delete_path_value(
+        parent_fields,
+        structure.get("child_array_path", ""),
+    )
+    _delete_path_value(
+        parent_fields,
+        structure.get("grandchild_array_path", ""),
+    )
+
+    now = now_iso()
+    data = {
+        **parent_fields,
+        "document_id": document_id,
+        "source_type": source["source_type"],
+        "source_id": source["source_id"],
+        "data_source_id": source["data_source_id"],
+        "data_source_name": source["data_source_name"],
+        "tenant_id": source["tenant_id"],
+        "file_name": source["file_name"],
+        "extension": source["extension"],
+        "content_type": source["content_type"],
+        "bucket_name": source["bucket_name"],
+        "gcs_path": source["gcs_path"],
+        "gcs_uri": source["gcs_uri"],
+        "size_bytes": len(content),
+        "record_count": 0,
+        "processing_pattern": structure.get(
+            "processing_pattern"
+        ),
+        "status": "processed",
+        "processed_at": now,
+        "processed_by": user.get("email", ""),
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
+    }
+
+    if not existing:
+        data.update({
+            "created_at": now,
+            "created_by": user.get("email", ""),
+        })
+
+    return data
+
+
+def _write_import_record(
+    *,
+    document_reference,
+    document_id: str,
+    source: dict,
+    content: bytes,
+    user: dict,
+) -> int:
+    value = _load_json_object(content)
+    record_id = source["source_id"]
+    now = now_iso()
+
+    record_data = {
+        "record_id": record_id,
+        "document_id": document_id,
+        "source_type": source["source_type"],
+        "source_id": source["source_id"],
+        "data_source_id": source["data_source_id"],
+        "tenant_id": source["tenant_id"],
+        "item_type": source.get("item_type"),
+        "level": source.get("level", 0),
+        "parent_id": source.get("parent_id"),
+        "source_index": source.get("source_index"),
+        **value,
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
+    }
+
+    reference = (
+        document_reference
+        .collection(RAW_RECORD_SUBCOLLECTION)
+        .document(record_id)
+    )
+    existing = reference.get().exists
+
+    if not existing:
+        record_data.update({
+            "created_at": now,
+            "created_by": user.get("email", ""),
+        })
+
+    reference.set(record_data, merge=True)
+
+    record_count = sum(
+        1
+        for _ in document_reference
+        .collection(RAW_RECORD_SUBCOLLECTION)
+        .stream()
+    )
+
+    document_reference.set({
+        "record_count": record_count,
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
+    }, merge=True)
+
+    return record_count
+
+
 def process_source_file(
     *,
     data_source_id: str,
@@ -1350,41 +1559,137 @@ def process_source_file(
     extension = validate_supported_extension(
         source["extension"]
     )
-
     content = _download_source(source)
 
-    records, analyzer_data = analyze_file(
+    item_type = normalize_text(
+        source.get("item_type")
+    ).lower()
+    processing_pattern = normalize_text(
+        source.get("processing_pattern")
+    ).lower()
+
+    is_relation_item = (
+        extension == "json"
+        and processing_pattern in {
+            "parent_child",
+            "parent_child_grandchild",
+        }
+        and item_type in {
+            "parent",
+            "child",
+            "grandchild",
+        }
+    )
+
+    db = get_firestore_client()
+
+    if is_relation_item:
+        root_parent_id = _get_root_parent_id(source)
+        document_id = (
+            f"{source['source_type']}_"
+            f"{root_parent_id}"
+        )
+        document_reference = get_raw_document_reference(
+            db,
+            source["data_source_id"],
+            document_id,
+        )
+        existing_document = document_reference.get()
+
+        if item_type == "parent":
+            if existing_document.exists and not overwrite:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "この親データは既に"
+                        "Firestoreへ登録されています。"
+                    ),
+                )
+
+            if existing_document.exists:
+                _delete_existing_records(
+                    document_reference
+                )
+
+            document_data = _build_parent_document_data(
+                source=source,
+                content=content,
+                document_id=document_id,
+                user=user,
+                existing=existing_document.exists,
+            )
+            document_reference.set(
+                document_data,
+                merge=True,
+            )
+            record_count = 0
+        else:
+            if not existing_document.exists:
+                parent_item = _get_import_item(
+                    source["data_source_id"],
+                    root_parent_id,
+                )
+                parent_source = get_source_file(
+                    source["data_source_id"],
+                    root_parent_id,
+                )
+                parent_content = _download_source(
+                    parent_source
+                )
+                parent_data = _build_parent_document_data(
+                    source=parent_source,
+                    content=parent_content,
+                    document_id=document_id,
+                    user=user,
+                    existing=False,
+                )
+                document_reference.set(
+                    parent_data,
+                    merge=True,
+                )
+
+            record_count = _write_import_record(
+                document_reference=document_reference,
+                document_id=document_id,
+                source=source,
+                content=content,
+                user=user,
+            )
+
+        source["source_reference"].set({
+            "raw_document_id": document_id,
+            "analysis_status": "completed",
+            "analysis_record_count": record_count,
+            "analyzed_at": now_iso(),
+            "analysis_completed_at": now_iso(),
+            "analyzed_by": user.get("email", ""),
+        }, merge=True)
+
+        return {
+            "status": "completed",
+            "document_id": document_id,
+            "source_type": source["source_type"],
+            "source_id": source["source_id"],
+            "extension": extension,
+            "record_count": record_count,
+            "item_type": item_type,
+        }
+
+    records, analysis_metadata = analyze_file(
         extension,
         content,
     )
-
-    if extension == "json":
-        parent_fields = _safe_value(
-            analyzer_data
-        )
-        analysis_metadata = {}
-    else:
-        parent_fields = {}
-        analysis_metadata = _safe_value(
-            analyzer_data
-        )
 
     document_id = (
         f"{source['source_type']}_"
         f"{source['source_id']}"
     )
-
-    db = get_firestore_client()
-
     document_reference = get_raw_document_reference(
         db,
         source["data_source_id"],
         document_id,
     )
-
-    existing_document = (
-        document_reference.get()
-    )
+    existing_document = document_reference.get()
 
     if existing_document.exists and not overwrite:
         raise HTTPException(
@@ -1401,63 +1706,35 @@ def process_source_file(
         )
 
     now = now_iso()
-
     document_data = {
-        **parent_fields,
-        "document_id":
-            document_id,
-        "source_type":
-            source["source_type"],
-        "source_id":
-            source["source_id"],
-        "data_source_id":
-            source["data_source_id"],
-        "data_source_name":
-            source["data_source_name"],
-        "tenant_id":
-            source["tenant_id"],
-        "file_name":
-            source["file_name"],
-        "extension":
-            extension,
-        "content_type":
-            source["content_type"],
-        "bucket_name":
-            source["bucket_name"],
-        "gcs_path":
-            source["gcs_path"],
-        "gcs_uri":
-            source["gcs_uri"],
-        "size_bytes":
-            len(content),
-        "record_count":
-            len(records),
-        "analysis_metadata":
-            analysis_metadata,
-        "json_parent_fields":
-            (
-                sorted(parent_fields.keys())
-                if extension == "json"
-                else firestore.DELETE_FIELD
-            ),
-        "status":
-            "processed",
-        "processed_at":
-            now,
-        "processed_by":
-            user.get("email", ""),
-        "updated_at":
-            now,
-        "updated_by":
-            user.get("email", ""),
+        "document_id": document_id,
+        "source_type": source["source_type"],
+        "source_id": source["source_id"],
+        "data_source_id": source["data_source_id"],
+        "data_source_name": source["data_source_name"],
+        "tenant_id": source["tenant_id"],
+        "file_name": source["file_name"],
+        "extension": extension,
+        "content_type": source["content_type"],
+        "bucket_name": source["bucket_name"],
+        "gcs_path": source["gcs_path"],
+        "gcs_uri": source["gcs_uri"],
+        "size_bytes": len(content),
+        "record_count": len(records),
+        "analysis_metadata": _safe_value(
+            analysis_metadata
+        ),
+        "status": "processed",
+        "processed_at": now,
+        "processed_by": user.get("email", ""),
+        "updated_at": now,
+        "updated_by": user.get("email", ""),
     }
 
     if not existing_document.exists:
         document_data.update({
-            "created_at":
-                now,
-            "created_by":
-                user.get("email", ""),
+            "created_at": now,
+            "created_by": user.get("email", ""),
         })
 
     document_reference.set(
@@ -1475,48 +1752,30 @@ def process_source_file(
         )
     except Exception as error:
         document_reference.set({
-            "status":
-                "failed",
-            "error_message":
-                str(error),
-            "updated_at":
-                now_iso(),
+            "status": "failed",
+            "error_message": str(error),
+            "updated_at": now_iso(),
         }, merge=True)
-
         raise
 
-    source_reference = source["source_reference"]
-
-    source_reference.set({
-        "raw_document_id":
-            document_id,
-        "analysis_status":
-            "completed",
-        "analysis_record_count":
-            len(records),
-        "analyzed_at":
-            now_iso(),
-        "analysis_completed_at":
-            now_iso(),
-        "analyzed_by":
-            user.get("email", ""),
+    source["source_reference"].set({
+        "raw_document_id": document_id,
+        "analysis_status": "completed",
+        "analysis_record_count": len(records),
+        "analyzed_at": now_iso(),
+        "analysis_completed_at": now_iso(),
+        "analyzed_by": user.get("email", ""),
     }, merge=True)
 
     return {
-        "status":
-            "completed",
-        "document_id":
-            document_id,
-        "source_type":
-            source["source_type"],
-        "source_id":
-            source["source_id"],
-        "extension":
-            extension,
-        "record_count":
-            len(records),
-        "split_method":
-            analysis_metadata.get(
-                "split_method"
-            ),
+        "status": "completed",
+        "document_id": document_id,
+        "source_type": source["source_type"],
+        "source_id": source["source_id"],
+        "extension": extension,
+        "record_count": len(records),
+        "split_method": analysis_metadata.get(
+            "split_method"
+        ),
     }
+
